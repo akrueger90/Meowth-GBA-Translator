@@ -1,7 +1,9 @@
 """Configuration form component using CustomTkinter."""
 
+import os
 from pathlib import Path
 from tkinter import filedialog
+from tkinter import ttk
 
 import customtkinter as ctk
 
@@ -63,14 +65,14 @@ class ConfigForm(ctk.CTkFrame):
         src_frame = ctk.CTkFrame(lang_row, fg_color="transparent")
         src_frame.pack(side="left", fill="x", expand=True, padx=(0, 6))
         ctk.CTkLabel(src_frame, text="Source:", font=("", 11)).pack(anchor="w")
-        self.source_lang = ctk.CTkComboBox(src_frame, values=LANG_NAMES, state="readonly", height=30)
+        self.source_lang = ttk.Combobox(src_frame, values=LANG_NAMES, state="readonly", width=25)
         self.source_lang.set("English")
         self.source_lang.pack(fill="x", pady=(2, 0))
 
         tgt_frame = ctk.CTkFrame(lang_row, fg_color="transparent")
         tgt_frame.pack(side="right", fill="x", expand=True, padx=(6, 0))
         ctk.CTkLabel(tgt_frame, text="Target:", font=("", 11)).pack(anchor="w")
-        self.target_lang = ctk.CTkComboBox(tgt_frame, values=LANG_NAMES, state="readonly", height=30)
+        self.target_lang = ttk.Combobox(tgt_frame, values=LANG_NAMES, state="readonly", width=25)
         self.target_lang.set("Chinese")
         self.target_lang.pack(fill="x", pady=(2, 0))
 
@@ -82,11 +84,9 @@ class ConfigForm(ctk.CTkFrame):
         prov_frame = ctk.CTkFrame(pm_row, fg_color="transparent")
         prov_frame.pack(side="left", fill="x", expand=True, padx=(0, 6))
         ctk.CTkLabel(prov_frame, text="Provider:", font=("", 11)).pack(anchor="w")
-        self.provider = ctk.CTkComboBox(
-            prov_frame, values=list(PROVIDER_PRESETS.keys()),
-            state="readonly", height=30, command=self._on_provider_change
-        )
+        self.provider = ttk.Combobox(prov_frame, values=list(PROVIDER_PRESETS.keys()), state="readonly", width=25)
         self.provider.set("deepseek")
+        self.provider.bind("<<ComboboxSelected>>", lambda e: self._on_provider_change(self.provider.get()))
         self.provider.pack(fill="x", pady=(2, 0))
 
         model_frame = ctk.CTkFrame(pm_row, fg_color="transparent")
@@ -175,12 +175,16 @@ class ConfigForm(ctk.CTkFrame):
         provider = self.provider.get()
         preset = PROVIDER_PRESETS.get(provider)
         api_key = self.api_key_entry.get().strip()
+        defaults = TranslationConfig()
 
-        # If user selected output dir, put work dir next to it
-        output_dir = Path(self.output_entry.get()) if self.output_entry.get() else None
-        work_dir = None
-        if output_dir:
-            work_dir = output_dir.parent / "work"
+        output_value = self.output_entry.get().strip()
+        if output_value:
+            output_dir = Path(output_value).expanduser()
+            # Keep temporary work artifacts close to selected output directory.
+            work_dir = output_dir / "work"
+        else:
+            output_dir = defaults.output_dir
+            work_dir = defaults.work_dir
 
         return TranslationConfig(
             source_lang=self._lang_name_to_code(self.source_lang.get()),
@@ -203,6 +207,16 @@ class ConfigForm(ctk.CTkFrame):
         rom_path = Path(self.rom_entry.get())
         if not rom_path.exists():
             return False, f"ROM file not found: {rom_path}"
+
         if not self.api_key_entry.get().strip():
-            return False, "Please enter your API key"
+            provider = self.provider.get()
+            preset = PROVIDER_PRESETS.get(provider)
+            env_var = preset[2] if preset and len(preset) > 2 else None
+            if not env_var or not os.environ.get(env_var):
+                if env_var:
+                    return False, f"Please enter your API key or set {env_var}"
+                return False, "Please enter your API key"
+
         return True, ""
+
+
