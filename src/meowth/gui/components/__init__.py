@@ -3,6 +3,6 @@
 from .config_form import ConfigForm
 from .log_view import LogView
 from .progress_view import ProgressView
-from .review_dialog import ReviewDialog
+from .review_panel import ReviewPanel
 
-__all__ = ["ConfigForm", "LogView", "ProgressView", "ReviewDialog"]
+__all__ = ["ConfigForm", "LogView", "ProgressView", "ReviewPanel"]

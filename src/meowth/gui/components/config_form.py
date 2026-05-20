@@ -59,118 +59,131 @@ class ConfigForm(ctk.CTkFrame):
 
     def __init__(self, master):
         """Initialize configuration form."""
-        super().__init__(master, corner_radius=10)
+        super().__init__(master, corner_radius=12, fg_color=("gray95", "gray14"))
 
+        # Use a regular frame, not scrollable - the parent handles scrolling
         inner = ctk.CTkFrame(self, fg_color="transparent")
-        inner.pack(fill="x", padx=14, pady=10)
+        inner.pack(fill="both", expand=True, padx=14, pady=12)
 
-        # --- Row 1: ROM File ---
-        ctk.CTkLabel(inner, text="ROM File", font=("", 12, "bold")).pack(anchor="w")
+        # --- ROM File ---
+        ctk.CTkLabel(inner, text="ROM File", font=("", 11, "bold")).pack(anchor="w", pady=(0, 4))
         rom_row = ctk.CTkFrame(inner, fg_color="transparent")
-        rom_row.pack(fill="x", pady=(2, 8))
+        rom_row.pack(fill="x", pady=(0, 8))
         self.rom_entry = ctk.CTkEntry(
-            rom_row, placeholder_text="Select a GBA ROM file...", height=30
+            rom_row, placeholder_text="Select a .gba ROM file…", height=32,
         )
         self.rom_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(
-            rom_row, text="Browse", width=80, height=30, command=self._browse_rom
+            rom_row, text="Browse", width=80, height=32,
+            corner_radius=8, command=self._browse_rom,
         ).pack(side="right")
 
-        # --- Row 1.5: Output Directory ---
-        ctk.CTkLabel(inner, text="Output Directory", font=("", 12, "bold")).pack(anchor="w")
+        # --- Output Directory ---
+        ctk.CTkLabel(inner, text="Output Directory", font=("", 11, "bold")).pack(anchor="w", pady=(0, 4))
         output_row = ctk.CTkFrame(inner, fg_color="transparent")
-        output_row.pack(fill="x", pady=(2, 8))
+        output_row.pack(fill="x", pady=(0, 8))
         self.output_entry = ctk.CTkEntry(
-            output_row, placeholder_text="Select output directory...", height=30
+            output_row, placeholder_text="Select output directory…", height=32,
         )
         self.output_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(
-            output_row, text="Browse", width=80, height=30, command=self._browse_output
+            output_row, text="Browse", width=80, height=32,
+            corner_radius=8, command=self._browse_output,
         ).pack(side="right")
 
-        # --- Row 2: Languages ---
-        ctk.CTkLabel(inner, text="Languages", font=("", 12, "bold")).pack(anchor="w")
+        # --- Languages ---
+        ctk.CTkLabel(inner, text="Translation Languages", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
         lang_row = ctk.CTkFrame(inner, fg_color="transparent")
-        lang_row.pack(fill="x", pady=(2, 8))
+        lang_row.pack(fill="x", pady=(0, 8))
 
         src_frame = ctk.CTkFrame(lang_row, fg_color="transparent")
-        src_frame.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkLabel(src_frame, text="Source:", font=("", 11)).pack(anchor="w")
-        self.source_lang = ttk.Combobox(src_frame, values=LANG_NAMES, state="readonly", width=25)
+        src_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        ctk.CTkLabel(src_frame, text="Source:", font=("", 10)).pack(anchor="w", pady=(0, 2))
+        self.source_lang = ttk.Combobox(src_frame, values=LANG_NAMES, state="readonly", height=5)
         self.source_lang.set("English")
-        self.source_lang.pack(fill="x", pady=(2, 0))
+        self.source_lang.pack(fill="x")
 
         tgt_frame = ctk.CTkFrame(lang_row, fg_color="transparent")
-        tgt_frame.pack(side="right", fill="x", expand=True, padx=(6, 0))
-        ctk.CTkLabel(tgt_frame, text="Target:", font=("", 11)).pack(anchor="w")
-        self.target_lang = ttk.Combobox(tgt_frame, values=LANG_NAMES, state="readonly", width=25)
+        tgt_frame.pack(side="right", fill="both", expand=True, padx=(6, 0))
+        ctk.CTkLabel(tgt_frame, text="Target:", font=("", 10)).pack(anchor="w", pady=(0, 2))
+        self.target_lang = ttk.Combobox(tgt_frame, values=LANG_NAMES, state="readonly", height=5)
         self.target_lang.set("Chinese")
-        self.target_lang.pack(fill="x", pady=(2, 0))
+        self.target_lang.pack(fill="x")
 
-        # --- Row 3: Provider + Model ---
-        ctk.CTkLabel(inner, text="LLM API", font=("", 12, "bold")).pack(anchor="w")
+        # --- Provider + Model ---
+        ctk.CTkLabel(inner, text="LLM Provider", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
         pm_row = ctk.CTkFrame(inner, fg_color="transparent")
-        pm_row.pack(fill="x", pady=(2, 4))
+        pm_row.pack(fill="x", pady=(0, 8))
 
         prov_frame = ctk.CTkFrame(pm_row, fg_color="transparent")
-        prov_frame.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkLabel(prov_frame, text="Provider:", font=("", 11)).pack(anchor="w")
-        self.provider = ttk.Combobox(prov_frame, values=list(PROVIDER_PRESETS.keys()), state="readonly", width=25)
+        prov_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        ctk.CTkLabel(prov_frame, text="Provider:", font=("", 10)).pack(anchor="w", pady=(0, 2))
+        self.provider = ttk.Combobox(
+            prov_frame,
+            values=list(PROVIDER_PRESETS.keys()),
+            state="readonly",
+            height=5,
+        )
         self.provider.set("deepseek")
         self.provider.bind("<<ComboboxSelected>>", lambda e: self._on_provider_change(self.provider.get()))
-        self.provider.pack(fill="x", pady=(2, 0))
+        self.provider.pack(fill="x")
 
         model_frame = ctk.CTkFrame(pm_row, fg_color="transparent")
-        model_frame.pack(side="right", fill="x", expand=True, padx=(6, 0))
-        ctk.CTkLabel(model_frame, text="Model:", font=("", 11)).pack(anchor="w")
-        self.model_entry = ctk.CTkEntry(model_frame, height=30)
+        model_frame.pack(side="right", fill="both", expand=True, padx=(6, 0))
+        ctk.CTkLabel(model_frame, text="Model:", font=("", 10)).pack(anchor="w", pady=(0, 2))
+        self.model_entry = ctk.CTkEntry(model_frame, height=32, corner_radius=8)
         self.model_entry.insert(0, PROVIDER_PRESETS["deepseek"][1])
-        self.model_entry.pack(fill="x", pady=(2, 0))
+        self.model_entry.pack(fill="x")
 
-        # --- Row 4: API Key ---
-        ctk.CTkLabel(inner, text="API Key:", font=("", 11)).pack(anchor="w", pady=(4, 0))
+        # --- API Key ---
+        ctk.CTkLabel(inner, text="API Key", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
         self.api_key_entry = ctk.CTkEntry(
-            inner, placeholder_text="sk-xxxxxxxxxxxxxxxxxxxxxxxx", height=30
+            inner,
+            placeholder_text="sk-xxxxxxxxxxxxxxxxxxxxxxxx",
+            height=32,
+            corner_radius=8,
         )
-        self.api_key_entry.pack(fill="x", pady=(2, 0))
+        self.api_key_entry.pack(fill="x", pady=(0, 8))
 
         # --- Advanced (collapsible) ---
         self.advanced_visible = False
         self.advanced_button = ctk.CTkButton(
-            inner, text="+ Advanced", command=self._toggle_advanced,
-            fg_color="transparent", text_color=("gray40", "gray60"),
-            hover_color=("gray85", "gray25"), height=24, font=("", 11),
+            inner, text="+ Advanced Settings", command=self._toggle_advanced,
+            fg_color="transparent", text_color=("gray45", "gray55"),
+            hover_color=("gray85", "gray25"), height=26, font=("", 11),
+            anchor="w",
         )
-        self.advanced_button.pack(anchor="w", pady=(6, 0))
+        self.advanced_button.pack(anchor="w", pady=(4, 0))
 
         self.advanced_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        adv_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        adv_row.pack(fill="x", pady=(4, 0))
+        # All three advanced fields in one compact row
+        adv_row_compact = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        adv_row_compact.pack(fill="x", pady=(6, 0))
 
-        bf = ctk.CTkFrame(adv_row, fg_color="transparent")
-        bf.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkLabel(bf, text="Batch Size:", font=("", 11)).pack(anchor="w")
-        self.batch_size = ctk.CTkEntry(bf, height=30)
+        bf_compact = ctk.CTkFrame(adv_row_compact, fg_color="transparent")
+        bf_compact.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        ctk.CTkLabel(bf_compact, text="Batch:", font=("", 9)).pack(anchor="w", pady=(0, 2))
+        self.batch_size = ctk.CTkEntry(bf_compact, height=28, corner_radius=6)
         self.batch_size.insert(0, "30")
-        self.batch_size.pack(fill="x", pady=(2, 0))
+        self.batch_size.pack(fill="x")
 
-        wf = ctk.CTkFrame(adv_row, fg_color="transparent")
-        wf.pack(side="right", fill="x", expand=True, padx=(6, 0))
-        ctk.CTkLabel(wf, text="Max Workers:", font=("", 11)).pack(anchor="w")
-        self.max_workers = ctk.CTkEntry(wf, height=30)
+        wf_compact = ctk.CTkFrame(adv_row_compact, fg_color="transparent")
+        wf_compact.pack(side="left", fill="both", expand=True, padx=(4, 4))
+        ctk.CTkLabel(wf_compact, text="Workers:", font=("", 9)).pack(anchor="w", pady=(0, 2))
+        self.max_workers = ctk.CTkEntry(wf_compact, height=28, corner_radius=6)
         self.max_workers.insert(0, "10")
-        self.max_workers.pack(fill="x", pady=(2, 0))
+        self.max_workers.pack(fill="x")
 
-        adv_row2 = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        adv_row2.pack(fill="x", pady=(4, 0))
-
-        tlf = ctk.CTkFrame(adv_row2, fg_color="transparent")
-        tlf.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkLabel(tlf, text="Test Limit (texts):", font=("", 11)).pack(anchor="w")
-        self.test_limit_texts = ctk.CTkEntry(tlf, height=30)
+        tlf_compact = ctk.CTkFrame(adv_row_compact, fg_color="transparent")
+        tlf_compact.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        ctk.CTkLabel(tlf_compact, text="Test:", font=("", 9)).pack(anchor="w", pady=(0, 2))
+        self.test_limit_texts = ctk.CTkEntry(tlf_compact, height=28, corner_radius=6)
         self.test_limit_texts.insert(0, "")
-        self.test_limit_texts.pack(fill="x", pady=(2, 0))
-        ctk.CTkLabel(tlf, text="Leave empty or 0 to translate all texts", font=("", 9), text_color="gray").pack(anchor="w", pady=(2, 0))
+        self.test_limit_texts.pack(fill="x")
+        ctk.CTkLabel(
+            tlf_compact, text="0=all",
+            font=("", 8), text_color=("gray55", "gray50"),
+        ).pack(anchor="w", pady=(2, 0))
 
     def _on_provider_change(self, provider_name: str):
         """Update default model when provider changes."""
@@ -207,11 +220,11 @@ class ConfigForm(ctk.CTkFrame):
         """Toggle advanced settings visibility."""
         if self.advanced_visible:
             self.advanced_frame.pack_forget()
-            self.advanced_button.configure(text="+ Advanced")
+            self.advanced_button.configure(text="+ Advanced Settings")
             self.advanced_visible = False
         else:
-            self.advanced_frame.pack(fill="x")
-            self.advanced_button.configure(text="- Advanced")
+            self.advanced_frame.pack(fill="x", pady=(4, 0))
+            self.advanced_button.configure(text="− Advanced Settings")
             self.advanced_visible = True
 
     def _lang_name_to_code(self, name: str) -> str:
@@ -347,5 +360,3 @@ class ConfigForm(ctk.CTkFrame):
                 return False, "Please enter your API key"
 
         return True, ""
-
-
