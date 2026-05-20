@@ -27,6 +27,13 @@ class GUICallbacks(TranslationCallbacks):
 
     def on_log(self, level: str, message: str):
         self._dispatch(self.log_view.append, level, message)
+        # Mirror pipeline logs to debug stream so users can see stage details
+        # (including table local/LLM counts) in terminal/debug output.
+        if hasattr(self.app, "_debug"):
+            try:
+                self.app._debug(f"[{level}] {message}")
+            except Exception:
+                pass
 
     def on_stage_change(self, stage: str, status: str):
         self._dispatch(self.progress_view.set_stage, stage, status)

@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from ..rom_writer import RomWriter
 from ..text_wrap import wrap_text
 from ..translator import Translator
 from ..translator import LLMAuthenticationError
+from ..translator import TranslationStoppedError
 from .callbacks import TranslationCallbacks
 from .config import TranslationConfig
 
@@ -149,6 +151,14 @@ def _strip_llm_newlines(text: str) -> str:
     return text
 
 
+def _has_meaningful_translation(entry: dict) -> bool:
+    """Return True when entry already has a non-empty translated value."""
+    translated = entry.get("translated")
+    if translated is None:
+        return False
+    return bool(str(translated).strip())
+
+
 def _postprocess_fd_macros(json_path: Path):
     """Replace HMA's raw FD escape sequences with named macros."""
     _HMA_KNOWN = {0x01, 0x02, 0x03, 0x04, 0x06}
@@ -178,6 +188,7 @@ class TranslationEngine:
         charmap: Charmap | None = None,
         glossary: Glossary | None = None,
         translator: Translator | None = None,
+        stop_event: threading.Event | None = None,
     ):
         """Initialize the translation engine.
 
@@ -190,6 +201,7 @@ class TranslationEngine:
         """
         self.config = config
         self.callbacks = callbacks or TranslationCallbacks()
+        self._stop_event = stop_event or threading.Event()
 
         self.charmap = charmap or Charmap(target_lang=config.target_lang)
         self.glossary = glossary or Glossary(
@@ -205,7 +217,16 @@ class TranslationEngine:
             api_key_env=config.api_key_env,
             model=config.model,
             cache_dir=config.work_dir / "cache",
+            stop_event=self._stop_event,
         )
+
+    def request_stop(self) -> None:
+        """Request cooperative cancellation for ongoing translation work."""
+        self._stop_event.set()
+
+    def _check_stop(self) -> None:
+        if self._stop_event.is_set():
+            raise TranslationStoppedError("Translation stopped by user")
 
     def _log(self, level: str, message: str):
         """Internal helper to send log messages via callbacks."""
@@ -251,22 +272,66 @@ class TranslationEngine:
         texts_path.write_text(json.dumps(limited_data, ensure_ascii=False, indent=2), encoding="utf-8")
         return original_count
 
+    def _save_translation_snapshot(self, data: dict, output_path: Path) -> None:
+        """Persist current translation state so work survives early stop/restart."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        temp_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(output_path)
+
     def translate_texts(
         self, texts_path: Path, output_path: Path
     ) -> Path:
         """Translate extracted texts JSON with parallel workers."""
-        data = json.loads(texts_path.read_text(encoding="utf-8"))
+        self._check_stop()
+        base_path = output_path if output_path.exists() else texts_path
+        data = json.loads(base_path.read_text(encoding="utf-8"))
         data = convert_format(data)
 
-        # Translate table entries
+        # Phase 1: local/glossary table translation only.
+        # This gives immediate visible progress before any LLM waits.
+        pending_table_llm: list[tuple[dict, list[dict]]] = []
         for table in data["tables"]:
-            self._translate_table(table)
+            self._check_stop()
+            unresolved_entries = [
+                entry for entry in table.get("entries", [])
+                if not _has_meaningful_translation(entry)
+            ]
+            # On resume, skip fully translated table groups entirely.
+            if not unresolved_entries:
+                continue
+
+            needs_llm = self._translate_table(
+                table,
+                run_llm=False,
+                entries=unresolved_entries,
+            )
+            if needs_llm:
+                pending_table_llm.append((table, needs_llm))
+            # Persist progress after each table, even when later tables block
+            # on LLM retries, so review pane and resume state stay up to date.
+            self._save_translation_snapshot(data, output_path)
+
+        # Phase 2: LLM fallback only for unresolved table entries.
+        for table, needs_llm in pending_table_llm:
+            self._check_stop()
+            category = table.get("category", "unknown")
+            self._log("info", f"Table {category}: running LLM fallback for {len(needs_llm)} entries")
+            self._translate_table_llm_batch(needs_llm)
+            self._inject_dynamic_terms(table)
+            self._save_translation_snapshot(data, output_path)
 
         # Translate free texts in parallel batches
-        free_texts = data["free_texts"]
+        free_texts = [entry for entry in data["free_texts"] if not _has_meaningful_translation(entry)]
         self._log(
             "info",
-            f"Translatable payload: {len(data['tables'])} table groups, {len(free_texts)} free-text entries",
+            (
+                f"Translatable payload: {len(data['tables'])} table groups, "
+                f"{len(free_texts)} pending free-text entries"
+            ),
         )
 
         batches = [
@@ -296,8 +361,16 @@ class TranslationEngine:
                 for i, b in enumerate(batches)
             }
             for future in as_completed(futures):
+                try:
+                    self._check_stop()
+                    idx, batch = future.result()
+                except TranslationStoppedError:
+                    self._save_translation_snapshot(data, output_path)
+                    for pending in futures:
+                        pending.cancel()
+                    raise
+
                 done_count += 1
-                idx, batch = future.result()
                 self._log("info", Messages.BATCH_COMPLETE.format(
                     current=done_count, total=total, batch_id=idx + 1
                 ))
@@ -307,18 +380,43 @@ class TranslationEngine:
                 self.callbacks.on_progress("translate", done_count, total,
                     f"Batch {idx + 1} completed")
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+                # Save completed batch progress continuously for resume/stop.
+                self._save_translation_snapshot(data, output_path)
+
+        self._save_translation_snapshot(data, output_path)
         return output_path
 
-    def _translate_table(self, table: dict):
-        """Translate a table's entries using glossary lookup."""
-        category = table["category"]
-        needs_llm: list[dict] = []  # entries deferred to batch LLM call
+    def _inject_dynamic_terms(self, table: dict) -> None:
+        """Inject translated map/pokemon names into glossary for later context."""
+        category = table.get("category", "")
+        if category not in ("map_names", "pokemon_names"):
+            return
 
-        for entry in table["entries"]:
+        for entry in table.get("entries", []):
+            original = entry.get("original", "").strip('"')
+            translated = entry.get("translated", "")
+            if translated and translated != original:
+                self.glossary.add_term(original, translated, "dynamic")
+
+    def _translate_table(
+        self,
+        table: dict,
+        run_llm: bool = True,
+        entries: list[dict] | None = None,
+    ) -> list[dict]:
+        """Translate a table's entries using glossary first, optional LLM fallback."""
+        self._check_stop()
+        category = table["category"]
+        target_entries = entries if entries is not None else table["entries"]
+        needs_llm: list[dict] = []  # entries deferred to batch LLM call
+        local_count = 0
+        encode_fallback_count = 0
+        glossary_miss_count = 0
+
+        for entry in target_entries:
+            if _has_meaningful_translation(entry):
+                continue
+
             original = entry["original"].strip('"')
             # Check term overrides (all games, Chinese only)
             if self.config.target_lang == "zh-Hans" and original in _TERM_OVERRIDES:
@@ -333,28 +431,48 @@ class TranslationEngine:
             # Try glossary lookup
             zh = self.glossary.lookup(original)
             if zh:
-                ok, bad = self.charmap.can_encode(zh)
+                # Sanitize glossary output for target language/PCS constraints
+                # before deciding to fall back to LLM.
+                candidate = self.charmap._sanitize(zh)
+                ok, bad = self.charmap.can_encode(candidate)
                 if ok:
-                    entry["translated"] = zh
+                    entry["translated"] = candidate
+                    local_count += 1
                     continue
                 # Glossary match exists but can't be encoded — treat as no match
+                encode_fallback_count += 1
                 zh = None
+
+            glossary_miss_count += 1
+
             # No glossary match: always defer to LLM
             # (the LLM batch filters out pure control codes / garbage automatically)
             needs_llm.append(entry)
 
         # Batch translate all deferred LLM entries
-        if needs_llm:
+        if run_llm and needs_llm:
+            self._log(
+                "info",
+                (
+                    f"Table {category}: local={local_count}, "
+                    f"llm_pending={len(needs_llm)}, encode_fallback={encode_fallback_count}, "
+                    f"glossary_miss={glossary_miss_count}"
+                ),
+            )
             self._translate_table_llm_batch(needs_llm)
 
-        # Inject map_names and pokemon_names into glossary for consistency
-        # (so free-text LLM calls can reference these translations)
-        if category in ("map_names", "pokemon_names"):
-            for entry in table["entries"]:
-                original = entry["original"].strip('"')
-                translated = entry.get("translated", "")
-                if translated and translated != original:
-                    self.glossary.add_term(original, translated, "dynamic")
+        self._log(
+            "info",
+            (
+                f"Table {category}: local={local_count}, "
+                f"llm={len(needs_llm) if run_llm else 0}, "
+                f"llm_pending={len(needs_llm) if not run_llm else 0}, "
+                f"encode_fallback={encode_fallback_count}, "
+                f"glossary_miss={glossary_miss_count}"
+            ),
+        )
+        self._inject_dynamic_terms(table)
+        return needs_llm
 
     def _translate_table_llm_batch(self, entries: list[dict]):
         """Batch LLM translate table entries (descriptions, map names, battle text).
@@ -364,6 +482,8 @@ class TranslationEngine:
         free-text processing.
         """
         import re
+
+        self._check_stop()
 
         # Separate: entries with real text vs pure control-code entries
         to_translate: list[tuple[dict, str, list]] = []  # (entry, protected, codes)
@@ -391,6 +511,8 @@ class TranslationEngine:
 
             try:
                 results = self.translator.translate_batch(protected_list, glossary_ctx)
+            except TranslationStoppedError:
+                raise
             except LLMAuthenticationError:
                 raise
             except Exception as e:
@@ -405,6 +527,7 @@ class TranslationEngine:
 
     def _translate_free_batch(self, batch: list[dict]):
         """Translate a batch of free text entries via LLM."""
+        self._check_stop()
         # Apply hardcoded overrides
         remaining = []
         for entry in batch:
@@ -440,6 +563,8 @@ class TranslationEngine:
         # Translate
         try:
             results = self.translator.translate_batch(protected_list, glossary_ctx)
+        except TranslationStoppedError:
+            raise
         except LLMAuthenticationError:
             raise
         except Exception as e:
@@ -638,6 +763,7 @@ class TranslationEngine:
         Returns:
             Tuple of (rom_path, translated_texts_path, output_rom_path).
         """
+        self._check_stop()
         rom_path, _, _, texts_path, translated_path, output_path = self._resolve_run_context(
             rom_path=rom_path,
             output_dir=output_dir,
@@ -651,6 +777,7 @@ class TranslationEngine:
         self._log("info", f"MeowthBridge executable: {bridge_path}")
         self._log("info", f"Starting extraction for ROM: {rom_path}")
         self.extract_texts(rom_path, texts_path)
+        self._check_stop()
         self._log("info", f"Extraction finished: {texts_path}")
         limit = self._get_effective_text_limit()
         if limit is not None:
@@ -662,6 +789,7 @@ class TranslationEngine:
         self.callbacks.on_stage_change("translate", "started")
         self._log("info", Messages.STAGE_TRANSLATE)
         self.translate_texts(texts_path, translated_path)
+        self._check_stop()
         self.callbacks.on_stage_change("translate", "completed")
 
         return rom_path, translated_path, output_path

@@ -18,6 +18,10 @@ class LLMAuthenticationError(RuntimeError):
     """Raised when the configured LLM provider rejects authentication."""
 
 
+class TranslationStoppedError(RuntimeError):
+    """Raised when translation is cancelled by the user."""
+
+
 def _get_default_cache_dir() -> Path:
     """Get default cache directory — writable in both dev and PyInstaller bundle."""
     if getattr(sys, '_MEIPASS', None):  # Running in PyInstaller bundle
@@ -126,6 +130,7 @@ class Translator:
         base_url: str | None = None,
         api_key_env: str | None = None,
         provider: str | None = None,
+        stop_event: threading.Event | None = None,
     ):
         # Resolve provider preset
         self.provider = provider or ""
@@ -146,6 +151,7 @@ class Translator:
         self._cache_lock = threading.Lock()
         self.source_lang = source_lang
         self.target_lang = target_lang
+        self._stop_event = stop_event
 
         # Select appropriate prompt template and fill in language names
         source_name = get_language_name(source_lang)
@@ -166,6 +172,19 @@ class Translator:
                 "{source_lang}", source_name_local
             ).replace("{target_lang}", target_name_local),
         }
+
+    def _check_stop(self) -> None:
+        if self._stop_event and self._stop_event.is_set():
+            raise TranslationStoppedError("Translation stopped by user")
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        end_at = time.time() + max(0.0, seconds)
+        while True:
+            self._check_stop()
+            remaining = end_at - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.25, remaining))
 
     def _cache_key(self, request_data: dict) -> str:
         content = json.dumps(request_data, sort_keys=True, ensure_ascii=False)
@@ -200,6 +219,8 @@ class Translator:
         splits into the wrong number of segments, falls back to translating
         each text individually to avoid misalignment.
         """
+        self._check_stop()
+
         if "groq" in self.base_url and len(texts) > 6:
             # Free-tier Groq has low TPM limits. Splitting large batches keeps
             # per-request token usage lower and reduces 429 bursts.
@@ -232,6 +253,8 @@ class Translator:
         # Call API
         try:
             content = self._call_api(system, user)
+        except TranslationStoppedError:
+            raise
         except RuntimeError as e:
             # If batch request still gets throttled, fall back to smaller
             # one-by-one requests so we can make progress instead of
@@ -285,6 +308,7 @@ class Translator:
         is_groq = "groq" in self.base_url
 
         for attempt in range(max_retries):
+            self._check_stop()
             try:
                 body: dict = {
                     "model": self.model,
@@ -302,7 +326,9 @@ class Translator:
                         now = time.time()
                         wait = Translator._groq_next_allowed_at - now
                         if wait > 0:
-                            time.sleep(wait)
+                            self._interruptible_sleep(wait)
+
+                        self._check_stop()
 
                         response = httpx.post(
                             f"{self.base_url}/chat/completions",
@@ -319,6 +345,7 @@ class Translator:
                         # repeated 429 backoff storms.
                         Translator._groq_next_allowed_at = time.time() + 2.5
                 else:
+                    self._check_stop()
                     response = httpx.post(
                         f"{self.base_url}/chat/completions",
                         headers={
@@ -347,7 +374,7 @@ class Translator:
                         f"[Rate limit hit ({self.base_url}), retrying in {wait:.2f}s "
                         f"({attempt + 1}/{max_retries})]"
                     )
-                    time.sleep(wait)
+                    self._interruptible_sleep(wait)
                     continue
                 # For other HTTP errors, include the response body in the message
                 try:
@@ -364,7 +391,7 @@ class Translator:
                     print(Messages.API_REQUEST_FAILED.format(
                         error=e, wait=wait, attempt=attempt+1, max_retries=max_retries
                     ))
-                    time.sleep(wait)
+                    self._interruptible_sleep(wait)
                 else:
                     raise
 
@@ -422,6 +449,7 @@ class Translator:
         system = self.prompts["system"].replace("{glossary}", glossary_context or empty_glossary)
         results = []
         for text in texts:
+            self._check_stop()
             user = self.prompts["user"].replace("{texts}", text)
 
             request_data = {
