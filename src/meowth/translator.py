@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -37,7 +38,7 @@ PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
     "deepseek":  ("https://api.deepseek.com/v1",              "deepseek-chat",     "DEEPSEEK_API_KEY"),
     "openai":    ("https://api.openai.com/v1",                 "gpt-4o",            "OPENAI_API_KEY"),
     "anthropic": ("https://api.anthropic.com/v1",              "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
-    "google":    ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "GOOGLE_API_KEY"),
+    "google":    ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash", "GOOGLE_API_KEY"),
     "groq":      ("https://api.groq.com/openai/v1",           "llama-3.3-70b-versatile", "GROQ_API_KEY"),
     "mistral":   ("https://api.mistral.ai/v1",                "mistral-large-latest", "MISTRAL_API_KEY"),
     "openrouter":("https://openrouter.ai/api/v1",             "openai/gpt-4o",     "OPENROUTER_API_KEY"),
@@ -111,6 +112,10 @@ Do not add numbering or extra explanations, only return the translated text.
 
 
 class Translator:
+    # Shared Groq throttle across all Translator instances/threads.
+    _groq_gate = threading.Lock()
+    _groq_next_allowed_at = 0.0
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -123,6 +128,7 @@ class Translator:
         provider: str | None = None,
     ):
         # Resolve provider preset
+        self.provider = provider or ""
         if provider and provider in PROVIDER_PRESETS:
             preset_url, preset_model, preset_env = PROVIDER_PRESETS[provider]
             base_url = base_url or preset_url
@@ -194,8 +200,17 @@ class Translator:
         splits into the wrong number of segments, falls back to translating
         each text individually to avoid misalignment.
         """
+        if "groq" in self.base_url and len(texts) > 6:
+            # Free-tier Groq has low TPM limits. Splitting large batches keeps
+            # per-request token usage lower and reduces 429 bursts.
+            merged: list[str] = []
+            for i in range(0, len(texts), 6):
+                merged.extend(self.translate_batch(texts[i : i + 6], glossary_context))
+            return merged
+
         joined = " ||| ".join(texts)
-        system = self.prompts["system"].replace("{glossary}", glossary_context or "（无）")
+        empty_glossary = "（无）" if self.target_lang == "zh-Hans" else "(none)"
+        system = self.prompts["system"].replace("{glossary}", glossary_context or empty_glossary)
         user = self.prompts["user"].replace("{texts}", joined)
 
         request_data = {
@@ -215,7 +230,24 @@ class Translator:
             print(Messages.CACHE_MISMATCH.format(parts=len(parts), texts=len(texts)))
 
         # Call API
-        content = self._call_api(system, user)
+        try:
+            content = self._call_api(system, user)
+        except RuntimeError as e:
+            # If batch request still gets throttled, fall back to smaller
+            # one-by-one requests so we can make progress instead of
+            # returning originals.
+            err = str(e).lower()
+            if "429" in err or "rate limit" in err or "rate_limit_exceeded" in err:
+                print("[Batch hit rate limit, falling back to individual requests]")
+                return self._translate_individually(texts, glossary_context)
+            # Other transient/provider-side batch issues: recursively split the
+            # batch to salvage as many translations as possible.
+            if len(texts) > 1:
+                mid = len(texts) // 2
+                left = self.translate_batch(texts[:mid], glossary_context)
+                right = self.translate_batch(texts[mid:], glossary_context)
+                return left + right
+            raise
 
         # Split and check alignment (filter empty strings from trailing |||)
         parts = [t.strip() for t in content.split("|||") if t.strip()]
@@ -237,33 +269,94 @@ class Translator:
         print(Messages.BATCH_SPLIT_MISMATCH.format(parts=len(parts), texts=len(texts)))
         return self._translate_individually(texts, glossary_context)
 
-    def _call_api(self, system: str, user: str, max_retries: int = 3) -> str:
+    def _call_api(self, system: str, user: str, max_retries: int = 5) -> str:
         """Send a single chat completion request and return the content."""
+        # Gemini 2.5 models enable thinking by default; its budget can exceed 4096
+        # tokens, causing a 400 if max_tokens is set below the thinking budget.
+        # Use a high ceiling so thinking + response tokens always fit.
+        is_gemini_25 = "gemini-2.5" in self.model
+        if is_gemini_25:
+            max_tokens = 24576
+        elif "groq" in self.base_url:
+            # Keep completion budget lower on free Groq tier to reduce TPM spikes.
+            max_tokens = 512
+        else:
+            max_tokens = 4096
+        is_groq = "groq" in self.base_url
+
         for attempt in range(max_retries):
             try:
-                response = httpx.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user},
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 4096,
-                    },
-                    timeout=120.0,
-                )
+                body: dict = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": max_tokens,
+                }
+                if is_groq:
+                    # Serialize Groq calls across workers and honor shared cooldown
+                    # to avoid synchronized 429 storms on free-tier TPM limits.
+                    with Translator._groq_gate:
+                        now = time.time()
+                        wait = Translator._groq_next_allowed_at - now
+                        if wait > 0:
+                            time.sleep(wait)
+
+                        response = httpx.post(
+                            f"{self.base_url}/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {self.api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=body,
+                            timeout=120.0,
+                        )
+
+                        # Proactive pacing for free-tier Groq TPM limits.
+                        # Slightly slower steady flow is faster overall than
+                        # repeated 429 backoff storms.
+                        Translator._groq_next_allowed_at = time.time() + 2.5
+                else:
+                    response = httpx.post(
+                        f"{self.base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=body,
+                        timeout=120.0,
+                    )
                 response.raise_for_status()
                 return response.json()["choices"][0]["message"]["content"]
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in {401, 403}:
                     raise LLMAuthenticationError(self._format_auth_error(e)) from e
-                raise
+                if e.response.status_code == 429 and attempt < max_retries - 1:
+                    wait = self._extract_retry_delay_seconds(e.response)
+                    if is_groq:
+                        # Share the cooldown across all workers so subsequent
+                        # requests don't immediately repeat the same 429.
+                        with Translator._groq_gate:
+                            Translator._groq_next_allowed_at = max(
+                                Translator._groq_next_allowed_at,
+                                time.time() + wait + 0.5,
+                            )
+                    print(
+                        f"[Rate limit hit ({self.base_url}), retrying in {wait:.2f}s "
+                        f"({attempt + 1}/{max_retries})]"
+                    )
+                    time.sleep(wait)
+                    continue
+                # For other HTTP errors, include the response body in the message
+                try:
+                    detail = e.response.json()
+                except Exception:
+                    detail = e.response.text
+                raise RuntimeError(
+                    f"HTTP {e.response.status_code} from {self.base_url}: {detail}"
+                ) from e
             except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError, httpx.NetworkError) as e:
                 if attempt < max_retries - 1:
                     wait = 2 ** attempt
@@ -274,6 +367,22 @@ class Translator:
                     time.sleep(wait)
                 else:
                     raise
+
+    def _extract_retry_delay_seconds(self, response: httpx.Response) -> float:
+        """Get a retry delay from HTTP headers/body, with sane fallback."""
+        retry_after = response.headers.get("retry-after")
+        if retry_after:
+            try:
+                return max(1.0, float(retry_after))
+            except ValueError:
+                pass
+
+        text = response.text or ""
+        match = re.search(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", text, re.IGNORECASE)
+        if match:
+            return max(1.0, float(match.group(1)) + 0.25)
+
+        return 2.0
 
     def _format_auth_error(self, error: httpx.HTTPStatusError) -> str:
         """Build a concise UI-safe error message for auth failures."""
@@ -309,7 +418,8 @@ class Translator:
         self, texts: list[str], glossary_context: str = ""
     ) -> list[str]:
         """Translate texts one by one as fallback when batch splitting fails."""
-        system = self.prompts["system"].replace("{glossary}", glossary_context or "（无）")
+        empty_glossary = "（无）" if self.target_lang == "zh-Hans" else "(none)"
+        system = self.prompts["system"].replace("{glossary}", glossary_context or empty_glossary)
         results = []
         for text in texts:
             user = self.prompts["user"].replace("{texts}", text)
