@@ -130,6 +130,17 @@ class ConfigForm(ctk.CTkFrame):
         self.max_workers.insert(0, "10")
         self.max_workers.pack(fill="x", pady=(2, 0))
 
+        adv_row2 = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        adv_row2.pack(fill="x", pady=(4, 0))
+
+        tlf = ctk.CTkFrame(adv_row2, fg_color="transparent")
+        tlf.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkLabel(tlf, text="Test Limit (texts):", font=("", 11)).pack(anchor="w")
+        self.test_limit_texts = ctk.CTkEntry(tlf, height=30)
+        self.test_limit_texts.insert(0, "")
+        self.test_limit_texts.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(tlf, text="Leave empty or 0 to translate all texts", font=("", 9), text_color="gray").pack(anchor="w", pady=(2, 0))
+
     def _on_provider_change(self, provider_name: str):
         """Update default model when provider changes."""
         preset = PROVIDER_PRESETS.get(provider_name)
@@ -186,6 +197,9 @@ class ConfigForm(ctk.CTkFrame):
             output_dir = defaults.output_dir
             work_dir = defaults.work_dir
 
+        test_limit_value = self.test_limit_texts.get().strip()
+        test_limit = int(test_limit_value) if test_limit_value and test_limit_value.isdigit() and int(test_limit_value) > 0 else None
+
         return TranslationConfig(
             source_lang=self._lang_name_to_code(self.source_lang.get()),
             target_lang=self._lang_name_to_code(self.target_lang.get()),
@@ -195,6 +209,7 @@ class ConfigForm(ctk.CTkFrame):
             api_key=api_key if api_key else None,
             batch_size=int(self.batch_size.get()) if self.batch_size.get().isdigit() else 30,
             max_workers=int(self.max_workers.get()) if self.max_workers.get().isdigit() else 10,
+            test_limit_texts=test_limit,
             rom_path=Path(self.rom_entry.get()) if self.rom_entry.get() else None,
             output_dir=output_dir,
             work_dir=work_dir,

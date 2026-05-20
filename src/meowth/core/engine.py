@@ -211,6 +211,46 @@ class TranslationEngine:
         """Internal helper to send log messages via callbacks."""
         self.callbacks.on_log(level, message)
 
+    def _get_effective_text_limit(self) -> int | None:
+        """Return configured positive text limit, or None for no limit."""
+        import os
+
+        value = self.config.test_limit_texts
+        if value is None:
+            env_value = os.environ.get("MEOWTH_TEST_LIMIT_TEXTS", "").strip()
+            if env_value:
+                try:
+                    value = int(env_value)
+                except ValueError:
+                    value = None
+
+        if value is None or value <= 0:
+            return None
+        return value
+
+    def _apply_text_limit_to_file(self, texts_path: Path, limit: int) -> int:
+        """Trim extracted JSON to first N entries, preserving file format."""
+        data = json.loads(texts_path.read_text(encoding="utf-8"))
+
+        if "entries" in data and isinstance(data["entries"], list):
+            original_count = len(data["entries"])
+            data["entries"] = data["entries"][:limit]
+            texts_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return original_count
+
+        # Already in converted format: flatten in stable order, then rebuild.
+        converted = convert_format(data)
+        flattened: list[dict] = []
+        for table in converted.get("tables", []):
+            flattened.extend(table.get("entries", []))
+        flattened.extend(converted.get("free_texts", []))
+
+        original_count = len(flattened)
+        limited = flattened[:limit]
+        limited_data = convert_format({"entries": limited})
+        texts_path.write_text(json.dumps(limited_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return original_count
+
     def translate_texts(
         self, texts_path: Path, output_path: Path
     ) -> Path:
@@ -224,6 +264,7 @@ class TranslationEngine:
 
         # Translate free texts in parallel batches
         free_texts = data["free_texts"]
+
         batches = [
             free_texts[i : i + self.config.batch_size]
             for i in range(0, len(free_texts), self.config.batch_size)
@@ -460,8 +501,10 @@ class TranslationEngine:
             if "translated" in entry:
                 all_entries.append(entry)
 
-        # Load manual entries (FireRed-specific)
-        if self.config.game == "firered":
+        # Load manual entries (FireRed-specific).
+        # Skip these when a test limit is active so build writes only the limited set.
+        limit = self._get_effective_text_limit()
+        if self.config.game == "firered" and limit is None:
             manual_path = Path(__file__).parent.parent / "manual_entries.json"
             if manual_path.exists():
                 manual = json.loads(manual_path.read_text(encoding="utf-8"))
@@ -599,6 +642,10 @@ class TranslationEngine:
         self.callbacks.on_stage_change("extract", "started")
         self._log("info", Messages.STAGE_EXTRACT)
         self.extract_texts(rom_path, texts_path)
+        limit = self._get_effective_text_limit()
+        if limit is not None:
+            original_count = self._apply_text_limit_to_file(texts_path, limit)
+            self._log("info", f"[TESTING] Extracted {min(limit, original_count)} / {original_count} texts")
         self.callbacks.on_stage_change("extract", "completed")
 
         # Stage 2: Translate

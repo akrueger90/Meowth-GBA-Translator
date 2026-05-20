@@ -52,6 +52,7 @@ class TranslationConfig:
     # Translation settings
     batch_size: int = 30
     max_workers: int = 10
+    test_limit_texts: int | None = None  # For testing: limit to N texts (None or 0 = all texts)
 
     # File paths
     rom_path: Path | None = None
