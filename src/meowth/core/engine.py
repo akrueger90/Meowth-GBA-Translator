@@ -15,6 +15,7 @@ from ..pcs_codes import FD_MACROS
 from ..rom_writer import RomWriter
 from ..text_wrap import wrap_text
 from ..translator import Translator
+from ..translator import LLMAuthenticationError
 from .callbacks import TranslationCallbacks
 from .config import TranslationConfig
 
@@ -343,6 +344,8 @@ class TranslationEngine:
 
             try:
                 results = self.translator.translate_batch(protected_list, glossary_ctx)
+            except LLMAuthenticationError:
+                raise
             except Exception as e:
                 print(f"[Table batch LLM failed: {e}, keeping originals]")
                 for entry, _, _ in chunk:
@@ -390,6 +393,8 @@ class TranslationEngine:
         # Translate
         try:
             results = self.translator.translate_batch(protected_list, glossary_ctx)
+        except LLMAuthenticationError:
+            raise
         except Exception as e:
             print(f"[Batch failed after retries: {e}, keeping originals]")
             for entry in remaining:
@@ -492,6 +497,22 @@ class TranslationEngine:
         import shutil as _shutil
         from ..resource_path import get_resource_path
 
+        def _resolve_resources_dir() -> Path | None:
+            """Locate HexManiac resource files for MeowthBridge.
+
+            Expected content includes hma.py and various reference files.
+            """
+            candidates = [
+                get_resource_path("resources"),
+                get_resource_path("HexManiacAdvance/src/HexManiac.Core/Models/Code"),
+                Path(__file__).resolve().parents[1] / "binaries" / "macos" / "Models" / "Code",
+                Path(__file__).resolve().parents[1] / "binaries" / "windows" / "Models" / "Code",
+            ]
+            for candidate in candidates:
+                if candidate.exists() and (candidate / "hma.py").exists():
+                    return candidate
+            return None
+
         exe = TranslationEngine.find_meowth_bridge()
         output_path = output_path.resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -503,13 +524,18 @@ class TranslationEngine:
 
         # MeowthBridge (via HMA) needs resources/ to exist in its CWD.
         # Find the actual resources directory and symlink/copy it into cwd.
-        resources_src = get_resource_path("resources")
+        resources_src = _resolve_resources_dir()
         resources_dst = cwd / "resources"
-        if resources_src.exists() and not resources_dst.exists():
+        if resources_src and not resources_dst.exists():
             try:
                 os.symlink(resources_src, resources_dst)
             except (OSError, NotImplementedError):
                 _shutil.copytree(str(resources_src), str(resources_dst))
+        if not resources_dst.exists():
+            raise RuntimeError(
+                "HexManiac resources not found. Expected hma.py in one of: "
+                "resources/, HexManiacAdvance/src/HexManiac.Core/Models/Code, or bundled binaries Models/Code."
+            )
 
         result = subprocess.run(
             [str(exe), "extract", str(rom_abs)],
@@ -540,7 +566,70 @@ class TranslationEngine:
         work_dir: Path | None = None,
     ) -> Path:
         """Run the full translation pipeline: extract -> translate -> build."""
-        # Use config values if not provided
+        rom_path, translated_path, output_path = self.run_extract_translate(
+            rom_path=rom_path,
+            output_dir=output_dir,
+            work_dir=work_dir,
+        )
+        self.build_from_translations(
+            rom_path=rom_path,
+            translations_path=translated_path,
+            output_path=output_path,
+        )
+        return output_path
+
+    def run_extract_translate(
+        self,
+        rom_path: Path | None = None,
+        output_dir: Path | None = None,
+        work_dir: Path | None = None,
+    ) -> tuple[Path, Path, Path]:
+        """Run only extract + translate stages.
+
+        Returns:
+            Tuple of (rom_path, translated_texts_path, output_rom_path).
+        """
+        rom_path, _, _, texts_path, translated_path, output_path = self._resolve_run_context(
+            rom_path=rom_path,
+            output_dir=output_dir,
+            work_dir=work_dir,
+        )
+
+        # Stage 1: Extract
+        self.callbacks.on_stage_change("extract", "started")
+        self._log("info", Messages.STAGE_EXTRACT)
+        self.extract_texts(rom_path, texts_path)
+        self.callbacks.on_stage_change("extract", "completed")
+
+        # Stage 2: Translate
+        self.callbacks.on_stage_change("translate", "started")
+        self._log("info", Messages.STAGE_TRANSLATE)
+        self.translate_texts(texts_path, translated_path)
+        self.callbacks.on_stage_change("translate", "completed")
+
+        return rom_path, translated_path, output_path
+
+    def build_from_translations(
+        self,
+        rom_path: Path,
+        translations_path: Path,
+        output_path: Path,
+    ) -> Path:
+        """Run build stage from an existing translated texts JSON file."""
+        self.callbacks.on_stage_change("build", "started")
+        self._log("info", Messages.STAGE_BUILD)
+        self.build_rom(rom_path, translations_path, output_path)
+        self.callbacks.on_stage_change("build", "completed")
+        self._log("info", Messages.COMPLETE.format(output=output_path))
+        return output_path
+
+    def _resolve_run_context(
+        self,
+        rom_path: Path | None = None,
+        output_dir: Path | None = None,
+        work_dir: Path | None = None,
+    ) -> tuple[Path, Path, Path, Path, Path, Path]:
+        """Resolve and validate input/output paths for a translation run."""
         rom_path = rom_path or self.config.rom_path
         output_dir = output_dir or self.config.output_dir
         work_dir = work_dir or self.config.work_dir
@@ -548,7 +637,6 @@ class TranslationEngine:
         if rom_path is None:
             raise ValueError("rom_path must be provided")
 
-        # Convert all paths to absolute to avoid issues with working directory changes
         rom_path = Path(rom_path).resolve()
         output_dir = Path(output_dir).resolve()
         work_dir = Path(work_dir).resolve()
@@ -566,38 +654,16 @@ class TranslationEngine:
             raise RuntimeError(Messages.ROM_UNSUPPORTED_GAME.format(game=self.config.game))
 
         # Compatibility check 2: reject decomp hacks when targeting CJK
-        from ..languages import is_cjk_language
         if is_cjk_language(self.config.target_lang) and is_decomp_rom(rom_path, self.config.game):
             with open(rom_path, "rb") as _f:
                 _f.seek(0xAC)
                 _raw_code = _f.read(4).decode("ascii", errors="replace")
             raise RuntimeError(Messages.ROM_DECOMP_HACK.format(code=_raw_code))
 
-        # Generate output filename
         original_name = rom_path.stem
         lang_code = self.config.target_lang.split("-")[0]
 
         texts_path = work_dir / "texts.json"
         translated_path = work_dir / "texts_translated.json"
         output_path = output_dir / f"{original_name}_{lang_code}.gba"
-
-        # Stage 1: Extract
-        self.callbacks.on_stage_change("extract", "started")
-        self._log("info", Messages.STAGE_EXTRACT)
-        self.extract_texts(rom_path, texts_path)
-        self.callbacks.on_stage_change("extract", "completed")
-
-        # Stage 2: Translate
-        self.callbacks.on_stage_change("translate", "started")
-        self._log("info", Messages.STAGE_TRANSLATE)
-        self.translate_texts(texts_path, translated_path)
-        self.callbacks.on_stage_change("translate", "completed")
-
-        # Stage 3: Build
-        self.callbacks.on_stage_change("build", "started")
-        self._log("info", Messages.STAGE_BUILD)
-        self.build_rom(rom_path, translated_path, output_path)
-        self.callbacks.on_stage_change("build", "completed")
-
-        self._log("info", Messages.COMPLETE.format(output=output_path))
-        return output_path
+        return rom_path, output_dir, work_dir, texts_path, translated_path, output_path
