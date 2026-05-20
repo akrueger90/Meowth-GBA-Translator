@@ -337,14 +337,11 @@ class TranslationEngine:
                 if ok:
                     entry["translated"] = zh
                     continue
-            # Descriptions, map names without glossary match, and battle text:
-            # defer to batch LLM call instead of one-by-one to avoid 500+ API calls
-            if "description" in category or (category == "map_names" and not zh) or category == "battle_text":
-                needs_llm.append(entry)
-            elif zh:
-                entry["translated"] = zh
-            else:
-                entry["translated"] = original
+                # Glossary match exists but can't be encoded — treat as no match
+                zh = None
+            # No glossary match: always defer to LLM
+            # (the LLM batch filters out pure control codes / garbage automatically)
+            needs_llm.append(entry)
 
         # Batch translate all deferred LLM entries
         if needs_llm:
@@ -510,10 +507,10 @@ class TranslationEngine:
             if "translated" in entry:
                 all_entries.append(entry)
 
-        # Load manual entries (FireRed-specific).
+        # Load manual entries (FireRed-specific, Chinese only).
         # Skip these when a test limit is active so build writes only the limited set.
         limit = self._get_effective_text_limit()
-        if self.config.game == "firered" and limit is None:
+        if self.config.game == "firered" and limit is None and self.config.target_lang == "zh-Hans":
             manual_path = Path(__file__).parent.parent / "manual_entries.json"
             if manual_path.exists():
                 manual = json.loads(manual_path.read_text(encoding="utf-8"))
