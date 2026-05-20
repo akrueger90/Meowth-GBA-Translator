@@ -77,6 +77,29 @@ meowth-gui
 meowth full pokemon.gba --provider deepseek
 ```
 
+### macOS local development (VS Code)
+
+For local run + debug on macOS, this repository includes ready-to-use VS Code config:
+
+```bash
+# One-time local setup
+python -m pip install -e ".[gui,dev]"
+
+# Build local MeowthBridge used by Python extract/build stages
+dotnet build src/MeowthBridge/MeowthBridge.csproj -c Debug
+```
+
+Then in VS Code:
+
+- Run task: `dev: setup mac`
+- Start debugger: `Meowth GUI (Python)` for GUI workflow
+- Or start debugger: `Meowth CLI full (prompt ROM path)` for CLI pipeline
+
+Notes:
+
+- Local `src/MeowthBridge/bin/...` builds are preferred automatically over bundled downloads.
+- On macOS, if .NET is installed in `~/.dotnet`, runtime env vars are auto-wired by the loader.
+
 ---
 
 ## Quick Start

@@ -6,6 +6,7 @@ import sys
 import urllib.request
 import urllib.error
 import shutil
+import subprocess
 import tempfile
 import time
 import zipfile
@@ -58,17 +59,74 @@ def get_executable_name() -> str:
     return "MeowthBridge.exe" if platform.system() == "Windows" else "MeowthBridge"
 
 
+def _ensure_unix_executable(path: Path):
+    """Ensure Unix binaries are executable for direct subprocess calls."""
+    if platform.system() == "Windows":
+        return
+    if path.exists() and path.is_file():
+        path.chmod(0o755)
+
+
+def _configure_dotnet_runtime_env():
+    """Make local dotnet installs discoverable when launching framework-dependent apphosts."""
+    if platform.system() != "Darwin":
+        return
+
+    if "DOTNET_ROOT" in os.environ:
+        return
+
+    candidate_root = None
+
+    # Common user-local install path.
+    home_root = Path.home() / ".dotnet"
+    if (home_root / "dotnet").exists():
+        candidate_root = home_root
+    else:
+        dotnet_path = shutil.which("dotnet")
+        if dotnet_path:
+            resolved = Path(dotnet_path).resolve()
+            candidate_root = resolved.parent
+
+    if candidate_root and (candidate_root / "dotnet").exists():
+        os.environ["DOTNET_ROOT"] = str(candidate_root)
+        path_parts = os.environ.get("PATH", "").split(os.pathsep)
+        if str(candidate_root) not in path_parts:
+            os.environ["PATH"] = (
+                f"{candidate_root}{os.pathsep}{os.environ.get('PATH', '')}"
+            ).strip(os.pathsep)
+
+
+def _looks_like_arch_mismatch(path: Path) -> bool:
+    """Heuristic check for CPU architecture mismatch on macOS."""
+    if platform.system() != "Darwin" or not path.exists():
+        return False
+
+    arch = platform.machine().lower()
+    try:
+        info = subprocess.check_output(["file", str(path)], text=True, stderr=subprocess.STDOUT)
+    except Exception:
+        return False
+
+    lowered = info.lower()
+    if arch in ("arm64", "aarch64"):
+        return "x86_64" in lowered and "arm64" not in lowered
+    if arch in ("x86_64", "amd64"):
+        return "arm64" in lowered and "x86_64" not in lowered
+    return False
+
+
 def find_meowth_bridge() -> Path:
     """Locate the MeowthBridge executable using multiple search strategies.
 
     Search order:
     1. Environment variable MEOWTH_BRIDGE_PATH (if set)
-    2. Bundled binary in package (src/meowth/binaries/{platform}/)
-    3. Development build (src/MeowthBridge/bin/Release or Debug)
+    2. Development build (src/MeowthBridge/bin/Release or Debug)
+    3. Bundled binary in package (src/meowth/binaries/{platform}/)
     4. Cached download (~/.meowth/binaries/{platform}/)
     5. Download from GitHub releases
     """
     exe_name = get_executable_name()
+    _configure_dotnet_runtime_env()
 
     # Strategy 1: Check environment variable
     env_path = os.environ.get("MEOWTH_BRIDGE_PATH")
@@ -81,30 +139,40 @@ def find_meowth_bridge() -> Path:
             if env_exe.exists():
                 return env_exe
 
-    # Strategy 2: Check bundled binary in package
-    package_dir = Path(__file__).parent
-    platform_name = get_platform_name()
-    bundled_exe = package_dir / platform_name / exe_name
-
-    if bundled_exe.exists():
-        if platform.system() != "Windows":
-            bundled_exe.chmod(0o755)
-        return bundled_exe
-
-    # Strategy 3: Check development build
+    # Strategy 2: Check development build
     project_root = Path(__file__).parent.parent.parent.parent
     meowth_bridge_dir = project_root / "src" / "MeowthBridge"
 
     for build_config in ("Release", "Debug"):
         dev_exe = meowth_bridge_dir / "bin" / build_config / "net8.0" / exe_name
         if dev_exe.exists():
+            _ensure_unix_executable(dev_exe)
             return dev_exe
+
+    # Strategy 3: Check bundled binary in package
+    package_dir = Path(__file__).parent
+    platform_name = get_platform_name()
+    bundled_exe = package_dir / platform_name / exe_name
+
+    if bundled_exe.exists():
+        _ensure_unix_executable(bundled_exe)
+        if _looks_like_arch_mismatch(bundled_exe):
+            raise RuntimeError(
+                "Found bundled MeowthBridge binary, but architecture does not match this Mac.\n"
+                f"Host architecture: {platform.machine()}\n"
+                f"Binary: {bundled_exe}\n"
+                "Build a local bridge and use it instead:\n"
+                "  dotnet build src/MeowthBridge/MeowthBridge.csproj -c Debug\n"
+                "Or set MEOWTH_BRIDGE_PATH to a compatible binary."
+            )
+        return bundled_exe
 
     # Strategy 4: Check old location (backward compatibility)
     old_location = project_root / "MeowthBridge" / "bin"
     for build_config in ("Release", "Debug"):
         old_exe = old_location / build_config / "net8.0" / exe_name
         if old_exe.exists():
+            _ensure_unix_executable(old_exe)
             return old_exe
 
     # Strategy 5: Download from GitHub
@@ -141,8 +209,7 @@ def _download_meowth_bridge() -> Path:
 
     # If already cached, return it
     if exe_path.exists():
-        if platform.system() != "Windows":
-            exe_path.chmod(0o755)
+        _ensure_unix_executable(exe_path)
         return exe_path
 
     # Download the ZIP file
@@ -165,8 +232,7 @@ def _download_meowth_bridge() -> Path:
         tmp_zip_path.unlink()
 
         # Make executable on Unix
-        if platform.system() != "Windows":
-            exe_path.chmod(0o755)
+        _ensure_unix_executable(exe_path)
 
         print(f"✅ Downloaded and cached to {cache_dir}")
         print(f"   (Subsequent runs will use the cached version)")

@@ -18,7 +18,7 @@ class ReviewDialog(ctk.CTkToplevel):
 
         self.transient(master)
         self.grab_set()
-        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.protocol("WM_DELETE_WINDOW", self._continue)
 
         self._build_ui()
 

@@ -7,6 +7,7 @@ import click
 from .core import TranslationCallbacks, TranslationConfig, TranslationEngine
 from .languages import validate_language
 from .pipeline import Pipeline
+from .toml_compat import load_toml_file
 from .translator import PROVIDER_PRESETS
 
 
@@ -27,11 +28,7 @@ def _load_config() -> dict:
     config_path = Path(__file__).parent.parent.parent / "meowth.toml"
     if not config_path.exists():
         return {}
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib  # type: ignore[no-redef]
-    return tomllib.loads(config_path.read_text(encoding="utf-8"))
+    return load_toml_file(config_path)
 
 
 def _provider_kwargs(provider, api_base, api_key_env, model) -> dict:

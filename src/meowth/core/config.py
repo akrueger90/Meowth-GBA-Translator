@@ -4,6 +4,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..toml_compat import load_toml_file
+
 
 def _get_default_work_dir() -> Path:
     """Get default work directory in a writable location."""
@@ -53,6 +55,7 @@ class TranslationConfig:
     batch_size: int = 30
     max_workers: int = 10
     test_limit_texts: int | None = None  # For testing: limit to N texts (None or 0 = all texts)
+    use_env_test_limit: bool = True
 
     # File paths
     rom_path: Path | None = None
@@ -75,12 +78,7 @@ class TranslationConfig:
         if not path.exists():
             return cls()
 
-        try:
-            import tomllib
-        except ImportError:
-            import tomli as tomllib  # type: ignore[no-redef]
-
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = load_toml_file(path)
         translation = data.get("translation", {})
         api = translation.get("api", {})
 

@@ -216,7 +216,7 @@ class TranslationEngine:
         import os
 
         value = self.config.test_limit_texts
-        if value is None:
+        if value is None and getattr(self.config, "use_env_test_limit", True):
             env_value = os.environ.get("MEOWTH_TEST_LIMIT_TEXTS", "").strip()
             if env_value:
                 try:
@@ -264,6 +264,10 @@ class TranslationEngine:
 
         # Translate free texts in parallel batches
         free_texts = data["free_texts"]
+        self._log(
+            "info",
+            f"Translatable payload: {len(data['tables'])} table groups, {len(free_texts)} free-text entries",
+        )
 
         batches = [
             free_texts[i : i + self.config.batch_size]
@@ -273,6 +277,11 @@ class TranslationEngine:
         self._log("info", Messages.BATCH_PROGRESS.format(
             total=total, workers=self.config.max_workers
         ))
+        if total == 0:
+            self._log(
+                "warning",
+                "No free-text batches to process. This usually means the extraction subset contains only table entries.",
+            )
 
         done_count = 0
 
@@ -641,7 +650,11 @@ class TranslationEngine:
         # Stage 1: Extract
         self.callbacks.on_stage_change("extract", "started")
         self._log("info", Messages.STAGE_EXTRACT)
+        bridge_path = self.find_meowth_bridge()
+        self._log("info", f"MeowthBridge executable: {bridge_path}")
+        self._log("info", f"Starting extraction for ROM: {rom_path}")
         self.extract_texts(rom_path, texts_path)
+        self._log("info", f"Extraction finished: {texts_path}")
         limit = self._get_effective_text_limit()
         if limit is not None:
             original_count = self._apply_text_limit_to_file(texts_path, limit)

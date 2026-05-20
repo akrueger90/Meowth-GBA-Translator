@@ -210,6 +210,7 @@ class ConfigForm(ctk.CTkFrame):
             batch_size=int(self.batch_size.get()) if self.batch_size.get().isdigit() else 30,
             max_workers=int(self.max_workers.get()) if self.max_workers.get().isdigit() else 10,
             test_limit_texts=test_limit,
+            use_env_test_limit=False,
             rom_path=Path(self.rom_entry.get()) if self.rom_entry.get() else None,
             output_dir=output_dir,
             work_dir=work_dir,

@@ -301,7 +301,7 @@ class MeowthGUI(ctk.CTk):
 
                 self.log_view.append(
                     "info",
-                    f"Review step: {len(candidates)} suspect entries available for retry.",
+                    f"Review step: {len(candidates)} suspect entries available for retry. Click Continue Build to finish.",
                 )
 
                 def _on_action(action: str, selected_keys: list[str]):
