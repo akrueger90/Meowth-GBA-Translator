@@ -70,6 +70,8 @@ class MeowthGUI(ctk.CTk):
         self.debug_log_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
+        self.config_form.load_state()
         self.after(16, self._process_ui_queue)
         self._debug("GUI initialized")
 
@@ -171,6 +173,14 @@ class MeowthGUI(ctk.CTk):
         self.log_view = LogView(main)
         self.log_view.pack(fill="x")
 
+    def _on_window_close(self):
+        """Persist form input before the window closes."""
+        try:
+            self.config_form.save_state()
+        except Exception as exc:
+            self._debug(f"Failed to save form state on close: {exc}")
+        self.destroy()
+
     def _start_translation(self):
         """Start the translation process."""
         self._debug("Start button clicked")
@@ -182,6 +192,7 @@ class MeowthGUI(ctk.CTk):
             return
 
         config = self.config_form.get_config()
+        self.config_form.save_state()
         self._debug(
             "Config prepared: "
             f"rom={config.rom_path}, output={config.output_dir}, work={config.work_dir}, "

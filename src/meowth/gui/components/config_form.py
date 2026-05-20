@@ -1,5 +1,6 @@
 """Configuration form component using CustomTkinter."""
 
+import json
 import os
 from pathlib import Path
 from tkinter import filedialog
@@ -21,6 +22,36 @@ LANGUAGES = {
 }
 
 LANG_NAMES = list(LANGUAGES.keys())
+LANGUAGE_CODES_TO_NAMES = {code: name for name, code in LANGUAGES.items()}
+STATE_FILE_PATH = Path.home() / ".meowth" / "gui-form-state.json"
+
+
+def load_form_state(path: Path = STATE_FILE_PATH) -> dict[str, str | bool]:
+    """Load persisted GUI form state from disk."""
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as state_file:
+            data = json.load(state_file)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    state: dict[str, str | bool] = {}
+    for key, value in data.items():
+        if isinstance(value, (str, bool)):
+            state[key] = value
+    return state
+
+
+def save_form_state(state: dict[str, str | bool], path: Path = STATE_FILE_PATH) -> None:
+    """Persist GUI form state to disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as state_file:
+        json.dump(state, state_file, ensure_ascii=True, indent=2, sort_keys=True)
 
 
 class ConfigForm(ctk.CTkFrame):
@@ -180,6 +211,83 @@ class ConfigForm(ctk.CTkFrame):
 
     def _lang_name_to_code(self, name: str) -> str:
         return LANGUAGES.get(name, "en")
+
+    def _lang_code_to_name(self, code: str) -> str:
+        return LANGUAGE_CODES_TO_NAMES.get(code, "English")
+
+    def _set_entry_value(self, entry: ctk.CTkEntry, value: str) -> None:
+        entry.delete(0, "end")
+        entry.insert(0, value)
+
+    def get_state(self) -> dict[str, str | bool]:
+        """Return current form values in a serializable shape."""
+        return {
+            "rom_path": self.rom_entry.get().strip(),
+            "output_dir": self.output_entry.get().strip(),
+            "source_lang": self._lang_name_to_code(self.source_lang.get()),
+            "target_lang": self._lang_name_to_code(self.target_lang.get()),
+            "provider": self.provider.get().strip(),
+            "model": self.model_entry.get().strip(),
+            "api_key": self.api_key_entry.get(),
+            "batch_size": self.batch_size.get().strip(),
+            "max_workers": self.max_workers.get().strip(),
+            "test_limit_texts": self.test_limit_texts.get().strip(),
+            "advanced_visible": self.advanced_visible,
+        }
+
+    def apply_state(self, state: dict[str, str | bool]) -> None:
+        """Apply previously saved values to the form."""
+        rom_path = state.get("rom_path")
+        if isinstance(rom_path, str):
+            self._set_entry_value(self.rom_entry, rom_path)
+
+        output_dir = state.get("output_dir")
+        if isinstance(output_dir, str):
+            self._set_entry_value(self.output_entry, output_dir)
+
+        source_lang = state.get("source_lang")
+        if isinstance(source_lang, str):
+            self.source_lang.set(self._lang_code_to_name(source_lang))
+
+        target_lang = state.get("target_lang")
+        if isinstance(target_lang, str):
+            self.target_lang.set(self._lang_code_to_name(target_lang))
+
+        provider = state.get("provider")
+        if isinstance(provider, str) and provider in PROVIDER_PRESETS:
+            self.provider.set(provider)
+
+        model = state.get("model")
+        if isinstance(model, str):
+            self._set_entry_value(self.model_entry, model)
+
+        api_key = state.get("api_key")
+        if isinstance(api_key, str):
+            self._set_entry_value(self.api_key_entry, api_key)
+
+        batch_size = state.get("batch_size")
+        if isinstance(batch_size, str):
+            self._set_entry_value(self.batch_size, batch_size)
+
+        max_workers = state.get("max_workers")
+        if isinstance(max_workers, str):
+            self._set_entry_value(self.max_workers, max_workers)
+
+        test_limit_texts = state.get("test_limit_texts")
+        if isinstance(test_limit_texts, str):
+            self._set_entry_value(self.test_limit_texts, test_limit_texts)
+
+        advanced_visible = state.get("advanced_visible")
+        if isinstance(advanced_visible, bool) and advanced_visible != self.advanced_visible:
+            self._toggle_advanced()
+
+    def load_state(self, path: Path = STATE_FILE_PATH) -> None:
+        """Load saved form values from disk, if present."""
+        self.apply_state(load_form_state(path))
+
+    def save_state(self, path: Path = STATE_FILE_PATH) -> None:
+        """Write current form values to disk."""
+        save_form_state(self.get_state(), path)
 
     def get_config(self) -> TranslationConfig:
         """Get current configuration."""
