@@ -13,6 +13,10 @@ import httpx
 from .languages import get_language_name, get_language_name_zh
 
 
+class LLMAuthenticationError(RuntimeError):
+    """Raised when the configured LLM provider rejects authentication."""
+
+
 def _get_default_cache_dir() -> Path:
     """Get default cache directory — writable in both dev and PyInstaller bundle."""
     if getattr(sys, '_MEIPASS', None):  # Running in PyInstaller bundle
@@ -256,6 +260,10 @@ class Translator:
                 )
                 response.raise_for_status()
                 return response.json()["choices"][0]["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in {401, 403}:
+                    raise LLMAuthenticationError(self._format_auth_error(e)) from e
+                raise
             except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError, httpx.NetworkError) as e:
                 if attempt < max_retries - 1:
                     wait = 2 ** attempt
@@ -266,6 +274,36 @@ class Translator:
                     time.sleep(wait)
                 else:
                     raise
+
+    def _format_auth_error(self, error: httpx.HTTPStatusError) -> str:
+        """Build a concise UI-safe error message for auth failures."""
+        provider = self.base_url.rstrip("/")
+        detail = ""
+
+        try:
+            payload = error.response.json()
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            error_data = payload.get("error")
+            if isinstance(error_data, dict):
+                detail = str(error_data.get("message") or "").strip()
+            elif error_data:
+                detail = str(error_data).strip()
+            elif payload.get("message"):
+                detail = str(payload["message"]).strip()
+
+        if not detail:
+            detail = error.response.text.strip()
+
+        message = (
+            f"LLM authentication failed ({error.response.status_code}) for {provider}. "
+            "Check the API key and provider settings."
+        )
+        if detail:
+            message = f"{message} {detail}"
+        return message
 
     def _translate_individually(
         self, texts: list[str], glossary_context: str = ""
