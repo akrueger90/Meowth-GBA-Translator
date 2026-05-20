@@ -1,6 +1,8 @@
 """Load official Pokemon terminology from PokeAPI CSV files."""
 
 import csv
+import re
+import unicodedata
 from pathlib import Path
 
 from .languages import SUPPORTED_LANGUAGES
@@ -47,7 +49,85 @@ MANUAL_OVERRIDES: dict[str, dict[str, str]] = {
         "POKEDEX": "图鉴",
         "POKéDEX": "图鉴",
     },
+    "de": {
+        "Pokédex": "Pokédex",
+        "Pokedex": "Pokédex",
+        "POKEDEX": "Pokédex",
+        "POKéDEX": "Pokédex",
+        "POKéMON": "Pokémon",
+        "POKéNAV": "PokéNav",
+    },
 }
+
+
+_GENDER_MACROS = {
+    r"\\sm": "♂",
+    r"\\sf": "♀",
+}
+
+# ROM-extracted name variants → canonical PokeAPI names
+# Handles truncation, spacing issues, and GBA encoding quirks
+ROM_NAME_VARIANTS: dict[str, str] = {
+    # Items - common variants
+    "BLK APRICORN": "Black Apricorn",
+    "BLU APRICORN": "Blue Apricorn",
+    "GRN APRICORN": "Green Apricorn",
+    "PNK APRICORN": "Pink Apricorn",
+    "RED APRICORN": "Red Apricorn",
+    "WHT APRICORN": "White Apricorn",
+    "YLW APRICORN": "Yellow Apricorn",
+    "ITEMFINDER": "Item Finder",
+    "POKéGEAR": "Pokégear",
+    "POKEGEAR": "Pokégear",
+    "SLOPOKETAIL": "Slowpoke Tail",
+    "PARALYZ HEAL": "Paralyze Heal",
+    "PARLYZ HEAL": "Paralyze Heal",  # spelling variant
+    "POKEFLUTE": "Poké Flute",
+    "SILKSCARF": "Silk Scarf",
+    "SILVERPOWDER": "Silver Powder",
+    "SOFTSAND": "Soft Sand",
+    "CHARCOAL": "Charcoal",
+    "WATERTAIL": "Water Tail",
+    "MIRACLESEED": "Miracle Seed",
+    "MAGNET": "Magnet",
+    "NEVERMELT": "Never-Melt Ice",
+    "DRAGONSCALE": "Dragon Scale",
+    "LEFTOVERS": "Leftovers",
+    "LIGHT BALL": "Light Ball",
+    "THICKCLUB": "Thick Club",
+    "X DEFEND": "X Defense",
+    "X SPECIAL": "X Sp. Atk",
+    "STICK": "Leek",
+    # Moves - capitalization and spacing variants
+    "SMELLINGSALT": "Smelling Salt",
+    "SmellingSalt": "Smelling Salt",
+    "VICEGRIP": "Vice Grip",
+    "Vicegrip": "Vice Grip",
+    "HIJUMPKICK": "Hi Jump Kick",
+    "Hi Jump Kick": "Hi Jump Kick",
+    "FAINTATTACK": "Faint Attack",
+    "Faint Attack": "Faint Attack",
+    # Types - ROM truncations
+    "ELECTR": "Electric",
+    "FIGHT": "Fighting",
+    "PSYCHC": "Psychic",
+    # Game-specific / Custom items (not in PokeAPI, keep as-is for LLM)
+    "DNA SAMPLE": "DNA SAMPLE",
+    "GBP CARD": "GBP CARD",
+    "MAP CARD": "MAP CARD",
+    "POKé TAR": "POKé TAR",
+    "PROGRAM": "PROGRAM",
+    "SATURN ROCK": "SATURN ROCK",
+}
+
+
+def _normalize_lookup_key(text: str) -> str:
+    """Normalize ROM and PokeAPI term variants to one lookup key."""
+    normalized = unicodedata.normalize("NFKC", text).strip()
+    for macro, symbol in _GENDER_MACROS.items():
+        normalized = re.sub(macro, symbol, normalized, flags=re.IGNORECASE)
+    normalized = normalized.casefold()
+    return "".join(ch for ch in normalized if ch.isalnum() or ch in "♀♂")
 
 
 class Glossary:
@@ -65,8 +145,7 @@ class Glossary:
         self.source_to_target: dict[str, str] = {}
         # Separate index for context matching: uppercase key → (original_source, target, category)
         self._upper_index: dict[str, tuple[str, str, str]] = {}
-        # Compact key index: uppercase with spaces/hyphens stripped
-        # Handles GBA's 13-char move names like THUNDERPUNCH → Thunder Punch
+        # Compact key index for punctuation/spacing variants and ROM macro forms.
         self._compact_index: dict[str, str] = {}
         # Category mapping: term → category
         self._term_category: dict[str, str] = {}
@@ -81,11 +160,15 @@ class Glossary:
         # Apply manual overrides (highest priority, overwrite PokeAPI data)
         overrides = MANUAL_OVERRIDES.get(target_lang, {})
         for source, target in overrides.items():
-            self.source_to_target[source] = target
-            self._upper_index[source.upper()] = (source, target, "manual")
-            self._term_category[source] = "manual"
-            compact = source.upper().replace(" ", "").replace("-", "")
-            self._compact_index[compact] = target
+            self._index_term(source, target, "manual")
+
+    def _index_term(self, source: str, target: str, category: str) -> None:
+        """Index a glossary term for direct, case-insensitive, and compact lookup."""
+        self.source_to_target[source] = target
+        self.source_to_target[source.upper()] = target
+        self._upper_index[source.upper()] = (source, target, category)
+        self._term_category[source] = category
+        self._compact_index[_normalize_lookup_key(source)] = target
 
     def _load_json(self, path: Path):
         """Load glossary from pre-built JSON file."""
@@ -99,8 +182,7 @@ class Glossary:
             category = term_categories.get(source, "unknown")
             self._upper_index[source.upper()] = (source, target, category)
             self._term_category[source] = category
-            compact = source.upper().replace(" ", "").replace("-", "")
-            self._compact_index[compact] = target
+            self._compact_index[_normalize_lookup_key(source)] = target
 
 
     def _load_all(self, base_dir: Path):
@@ -129,32 +211,48 @@ class Glossary:
             source_name = names.get(self.source_id, "")
             target_name = names.get(self.target_id, "")
             if source_name and target_name:
-                self.source_to_target[source_name] = target_name
-                self.source_to_target[source_name.upper()] = target_name
-                self._upper_index[source_name.upper()] = (source_name, target_name, category)
-                self._term_category[source_name] = category
-                compact = source_name.upper().replace(" ", "").replace("-", "")
-                self._compact_index[compact] = target_name
+                self._index_term(source_name, target_name, category)
 
     def lookup(self, source_text: str) -> str | None:
         """Look up target translation for a source term.
 
-        Falls back to compact matching (no spaces/hyphens) for GBA's
-        truncated names like THUNDERPUNCH → Thunder Punch.
+        Tries direct lookup first, then ROM variant mapping, then compact matching
+        for GBA's truncated names like THUNDERPUNCH → Thunder Punch.
         """
+        # Try direct lookup
         result = self.source_to_target.get(source_text) or self.source_to_target.get(source_text.upper())
         if result:
             return result
-        compact = source_text.upper().replace(" ", "").replace("-", "")
-        return self._compact_index.get(compact)
+        
+        # Try ROM variant mapping (e.g., PARALYZ HEAL → Paralyze Heal)
+        canonical = ROM_NAME_VARIANTS.get(source_text) or ROM_NAME_VARIANTS.get(source_text.upper())
+        if canonical:
+            result = self.source_to_target.get(canonical) or self.source_to_target.get(canonical.upper())
+            if result:
+                return result
+        
+        # Try compact matching (no spaces/hyphens)
+        return self._compact_index.get(_normalize_lookup_key(source_text))
+
+    def matches_expected_translation(self, source_text: str, translated_text: str) -> bool:
+        """Return True when translated_text matches the glossary result for source_text.
+
+        Normalizes ROM forms and uses normalized comparison so variants like
+        ``PARALYZ HEAL`` match canonical glossary forms like ``Paralyze Heal``.
+        """
+        # First normalize ROM form if it's a known variant
+        canonical_source = ROM_NAME_VARIANTS.get(source_text) or ROM_NAME_VARIANTS.get(source_text.upper())
+        if canonical_source:
+            source_text = canonical_source
+        
+        expected = self.lookup(source_text)
+        if not expected:
+            return False
+        return _normalize_lookup_key(expected) == _normalize_lookup_key(translated_text)
 
     def add_term(self, source: str, target: str, category: str = "dynamic") -> None:
         """Add a dynamic term to the glossary (e.g. from translated tables)."""
-        self.source_to_target[source] = target
-        self._upper_index[source.upper()] = (source, target, category)
-        self._term_category[source] = category
-        compact = source.upper().replace(" ", "").replace("-", "")
-        self._compact_index[compact] = target
+        self._index_term(source, target, category)
 
     def apply_to_text(self, text: str) -> str:
         """Apply glossary replacements to text using word-boundary matching."""
