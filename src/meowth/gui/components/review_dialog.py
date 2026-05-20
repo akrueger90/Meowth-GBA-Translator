@@ -8,12 +8,13 @@ import customtkinter as ctk
 class ReviewDialog(ctk.CTkToplevel):
     """Modal dialog to review suspect translations and choose next action."""
 
-    def __init__(self, master, candidates: list[dict], on_action):
+    def __init__(self, master, candidates: list[dict], suspect_count: int, on_action):
         super().__init__(master)
         self.title("Review Translations")
         self.geometry("1100x620")
         self.minsize(900, 500)
         self.candidates = candidates
+        self.suspect_count = suspect_count
         self.on_action = on_action
 
         self.transient(master)
@@ -28,14 +29,14 @@ class ReviewDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             header,
-            text="Review Suspect Entries",
+            text="Review Translations",
             font=("", 18, "bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
             header,
             text=(
-                "Entries shown below were untranslated or unchanged. "
-                "Select any rows and retry only those entries."
+                "All entries are shown below. Suspect rows are highlighted so you can "
+                "review everything and retry only the entries you want."
             ),
             text_color=("gray40", "gray70"),
             font=("", 12),
@@ -45,7 +46,7 @@ class ReviewDialog(ctk.CTkToplevel):
         summary.pack(fill="x", padx=16, pady=(0, 8))
         ctk.CTkLabel(
             summary,
-            text=f"Suspect entries: {len(self.candidates)}",
+            text=f"Total entries: {len(self.candidates)} | Highlighted suspects: {self.suspect_count}",
             font=("", 12, "bold"),
         ).pack(anchor="w")
 
@@ -70,6 +71,7 @@ class ReviewDialog(ctk.CTkToplevel):
         self.tree.column("category", width=150, minwidth=120, stretch=False)
         self.tree.column("original", width=360, minwidth=220, stretch=True)
         self.tree.column("translated", width=360, minwidth=220, stretch=True)
+        self.tree.tag_configure("suspect", background="#3f1d1d", foreground="#f8d7da")
 
         y_scroll = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree.xview)
@@ -83,6 +85,7 @@ class ReviewDialog(ctk.CTkToplevel):
         table_container.grid_columnconfigure(0, weight=1)
 
         for idx, candidate in enumerate(self.candidates):
+            tags = ("suspect",) if candidate.get("suspect") == "true" else ()
             self.tree.insert(
                 "",
                 "end",
@@ -94,6 +97,7 @@ class ReviewDialog(ctk.CTkToplevel):
                     candidate.get("original", ""),
                     candidate.get("translated", ""),
                 ),
+                tags=tags,
             )
 
         controls = ctk.CTkFrame(self, fg_color="transparent")
@@ -105,6 +109,15 @@ class ReviewDialog(ctk.CTkToplevel):
             width=100,
             command=self._select_all,
         ).pack(side="left")
+
+        ctk.CTkButton(
+            controls,
+            text="Select Suspects",
+            width=130,
+            command=self._select_suspects,
+            fg_color="#7c3aed",
+            hover_color="#6d28d9",
+        ).pack(side="left", padx=(8, 0))
 
         ctk.CTkButton(
             controls,
@@ -152,6 +165,13 @@ class ReviewDialog(ctk.CTkToplevel):
 
     def _select_all(self):
         self.tree.selection_set(self.tree.get_children())
+
+    def _select_suspects(self):
+        suspect_rows = [
+            row_id for row_id in self.tree.get_children()
+            if "suspect" in self.tree.item(row_id, "tags")
+        ]
+        self.tree.selection_set(suspect_rows)
 
     def _clear_selection(self):
         self.tree.selection_remove(self.tree.selection())

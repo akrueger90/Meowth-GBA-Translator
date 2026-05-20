@@ -130,7 +130,7 @@ class ConfigForm(ctk.CTkFrame):
         # --- Row 4: API Key ---
         ctk.CTkLabel(inner, text="API Key:", font=("", 11)).pack(anchor="w", pady=(4, 0))
         self.api_key_entry = ctk.CTkEntry(
-            inner, placeholder_text="sk-xxxxxxxxxxxxxxxxxxxxxxxx", height=30, show="*"
+            inner, placeholder_text="sk-xxxxxxxxxxxxxxxxxxxxxxxx", height=30
         )
         self.api_key_entry.pack(fill="x", pady=(2, 0))
 
@@ -178,6 +178,11 @@ class ConfigForm(ctk.CTkFrame):
         if preset:
             self.model_entry.delete(0, "end")
             self.model_entry.insert(0, preset[1])
+        if provider_name == "groq":
+            # Free Groq accounts are heavily TPM-limited.
+            # Safer defaults reduce rate-limit failures.
+            self._set_entry_value(self.batch_size, "6")
+            self._set_entry_value(self.max_workers, "2")
 
     def _browse_rom(self):
         """Open file dialog to select ROM."""

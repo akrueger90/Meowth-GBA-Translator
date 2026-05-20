@@ -303,8 +303,8 @@ class MeowthGUI(ctk.CTk):
 
         def _show_dialog():
             try:
-                candidates = self._load_review_candidates(translated_path)
-                if not candidates:
+                review_rows, suspect_count = self._load_review_candidates(translated_path)
+                if suspect_count == 0:
                     self.log_view.append("info", "No suspect entries found. Continuing to build.")
                     result["action"] = "continue"
                     done.set()
@@ -312,7 +312,7 @@ class MeowthGUI(ctk.CTk):
 
                 self.log_view.append(
                     "info",
-                    f"Review step: {len(candidates)} suspect entries available for retry. Click Continue Build to finish.",
+                    f"Review step: {suspect_count} suspect entries highlighted across {len(review_rows)} rows. Click Continue Build to finish.",
                 )
 
                 def _on_action(action: str, selected_keys: list[str]):
@@ -320,7 +320,7 @@ class MeowthGUI(ctk.CTk):
                     result["selected_keys"] = selected_keys
                     done.set()
 
-                dialog = ReviewDialog(self, candidates, _on_action)
+                dialog = ReviewDialog(self, review_rows, suspect_count, _on_action)
                 dialog.focus_force()
             except Exception as exc:
                 self._debug(f"Review dialog failed: {exc}")
@@ -332,14 +332,20 @@ class MeowthGUI(ctk.CTk):
         done.wait()
         return result
 
-    @staticmethod
-    def _is_suspect_entry(entry: dict) -> bool:
+    def _is_suspect_entry(self, entry: dict) -> bool:
         """Return True when an entry looks untranslated and worth retrying."""
         original = str(entry.get("original", "")).strip().strip('"')
         translated = str(entry.get("translated", "")).strip().strip('"')
         if not translated:
             return True
-        return translated == original
+        if translated != original:
+            return False
+
+        glossary = getattr(self.engine, "glossary", None)
+        if glossary and glossary.matches_expected_translation(original, translated):
+            return False
+
+        return True
 
     def _index_translation_entries(self, data: dict) -> dict[str, dict[str, Any]]:
         """Build a stable key-index for translated entries."""
@@ -367,16 +373,18 @@ class MeowthGUI(ctk.CTk):
 
         return indexed
 
-    def _load_review_candidates(self, translated_path: Path) -> list[dict[str, str]]:
-        """Load untranslated/suspect entries from translated JSON for review."""
+    def _load_review_candidates(self, translated_path: Path) -> tuple[list[dict[str, str]], int]:
+        """Load all translated entries for review and flag suspect ones."""
         data = json.loads(translated_path.read_text(encoding="utf-8"))
         indexed = self._index_translation_entries(data)
 
         candidates: list[dict[str, str]] = []
+        suspect_count = 0
         for item in indexed.values():
             entry = item["entry"]
-            if not self._is_suspect_entry(entry):
-                continue
+            is_suspect = self._is_suspect_entry(entry)
+            if is_suspect:
+                suspect_count += 1
             candidates.append(
                 {
                     "key": item["key"],
@@ -384,10 +392,11 @@ class MeowthGUI(ctk.CTk):
                     "category": str(item.get("category", "")),
                     "original": str(entry.get("original", "")),
                     "translated": str(entry.get("translated", "")),
+                    "suspect": "true" if is_suspect else "false",
                 }
             )
 
-        return candidates
+        return candidates, suspect_count
 
     def _retry_selected_entries(self, translated_path: Path, selected_keys: list[str]) -> tuple[int, int]:
         """Retry selected entries in-place using engine translation helpers."""
