@@ -161,6 +161,9 @@ class ReviewPanel(ctk.CTkFrame):
         self.set_activity("Idle", is_busy=False)
 
     def set_rows(self, candidates: list[dict[str, str]], suspect_count: int) -> None:
+        # Save current selection before clearing rows
+        previous_selection = self._selected_keys()
+        
         self.candidates = candidates
         self._row_id_to_index.clear()
         self._active_keys = {k for k in self._active_keys if any(c.get("key") == k for c in candidates)}
@@ -190,8 +193,21 @@ class ReviewPanel(ctk.CTkFrame):
         )
 
         if self.tree.get_children():
-            first = self.tree.get_children()[0]
-            self.tree.selection_set(first)
+            # Try to restore previous selection if those rows still exist
+            rows_to_select = []
+            if previous_selection:
+                for row_id in self.tree.get_children():
+                    values = self.tree.item(row_id, "values")
+                    if values and values[0] in previous_selection:
+                        rows_to_select.append(row_id)
+            
+            # If we restored some selection, use it; otherwise select first row
+            if rows_to_select:
+                self.tree.selection_set(rows_to_select)
+            else:
+                first = self.tree.get_children()[0]
+                self.tree.selection_set(first)
+            
             self._on_selection_changed()
         else:
             self.original_text.configure(state="normal")
