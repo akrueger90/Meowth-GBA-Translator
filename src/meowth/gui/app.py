@@ -546,8 +546,7 @@ class MeowthGUI(ctk.CTk):
         return resumables[0]
 
     def _ensure_engine_for_review(self):
-        if self.engine:
-            return
+        # Always recreate from current form config so profile switches take effect.
         config = self.config_form.get_config()
         callbacks = GUICallbacks(self, self.progress_view, self.log_view)
         self.engine = TranslationEngine(config, callbacks)

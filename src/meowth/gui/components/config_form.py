@@ -24,6 +24,31 @@ LANGUAGES = {
 LANG_NAMES = list(LANGUAGES.keys())
 LANGUAGE_CODES_TO_NAMES = {code: name for name, code in LANGUAGES.items()}
 STATE_FILE_PATH = Path.home() / ".meowth" / "gui-form-state.json"
+LLM_PROFILES_FILE = Path.home() / ".meowth" / "llm-profiles.json"
+
+# Shape stored per profile: {provider, model, api_key}
+_LLMProfile = dict[str, str]
+
+
+def load_llm_profiles(path: Path = LLM_PROFILES_FILE) -> dict[str, _LLMProfile]:
+    """Load named LLM profiles from disk."""
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if isinstance(v, dict)}
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def save_llm_profiles(profiles: dict[str, _LLMProfile], path: Path = LLM_PROFILES_FILE) -> None:
+    """Persist named LLM profiles to disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(profiles, f, ensure_ascii=True, indent=2, sort_keys=True)
 
 
 def load_form_state(path: Path = STATE_FILE_PATH) -> dict[str, str | bool]:
@@ -110,6 +135,24 @@ class ConfigForm(ctk.CTkFrame):
         self.target_lang.set("Chinese")
         self.target_lang.pack(fill="x")
 
+        # --- LLM Profiles ---
+        ctk.CTkLabel(inner, text="LLM Profiles", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
+        profile_row = ctk.CTkFrame(inner, fg_color="transparent")
+        profile_row.pack(fill="x", pady=(0, 8))
+        self._profiles: dict[str, _LLMProfile] = load_llm_profiles()
+        self.profile_combo = ttk.Combobox(
+            profile_row,
+            values=sorted(self._profiles.keys()),
+            height=5,
+        )
+        self.profile_combo.set("")
+        self.profile_combo.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.profile_combo.bind("<<ComboboxSelected>>", lambda e: self._on_profile_select(self.profile_combo.get()))
+        ctk.CTkButton(
+            profile_row, text="Save", width=70, height=32,
+            corner_radius=8, command=self._save_profile,
+        ).pack(side="right")
+
         # --- Provider + Model ---
         ctk.CTkLabel(inner, text="LLM Provider", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
         pm_row = ctk.CTkFrame(inner, fg_color="transparent")
@@ -185,6 +228,34 @@ class ConfigForm(ctk.CTkFrame):
             font=("", 8), text_color=("gray55", "gray50"),
         ).pack(anchor="w", pady=(2, 0))
 
+    def _on_profile_select(self, name: str) -> None:
+        """Load a saved LLM profile into the provider/model/api_key fields."""
+        profile = self._profiles.get(name)
+        if not profile:
+            return
+        provider = profile.get("provider", "")
+        if provider and provider in PROVIDER_PRESETS:
+            self.provider.set(provider)
+        model = profile.get("model", "")
+        if model:
+            self._set_entry_value(self.model_entry, model)
+        api_key = profile.get("api_key", "")
+        self._set_entry_value(self.api_key_entry, api_key)
+
+    def _save_profile(self) -> None:
+        """Save current provider/model/api_key under the profile name in the combobox."""
+        name = self.profile_combo.get().strip()
+        if not name:
+            return
+        self._profiles[name] = {
+            "provider": self.provider.get().strip(),
+            "model": self.model_entry.get().strip(),
+            "api_key": self.api_key_entry.get(),
+        }
+        save_llm_profiles(self._profiles)
+        self.profile_combo.configure(values=sorted(self._profiles.keys()))
+        self.profile_combo.set(name)
+
     def _on_provider_change(self, provider_name: str):
         """Update default model when provider changes."""
         preset = PROVIDER_PRESETS.get(provider_name)
@@ -244,6 +315,7 @@ class ConfigForm(ctk.CTkFrame):
             "output_dir": self.output_entry.get().strip(),
             "source_lang": self._lang_name_to_code(self.source_lang.get()),
             "target_lang": self._lang_name_to_code(self.target_lang.get()),
+            "llm_profile": self.profile_combo.get().strip(),
             "provider": self.provider.get().strip(),
             "model": self.model_entry.get().strip(),
             "api_key": self.api_key_entry.get(),
@@ -271,6 +343,7 @@ class ConfigForm(ctk.CTkFrame):
         if isinstance(target_lang, str):
             self.target_lang.set(self._lang_code_to_name(target_lang))
 
+        # Restore individual LLM fields from state first (fallback if no profile).
         provider = state.get("provider")
         if isinstance(provider, str) and provider in PROVIDER_PRESETS:
             self.provider.set(provider)
@@ -282,6 +355,12 @@ class ConfigForm(ctk.CTkFrame):
         api_key = state.get("api_key")
         if isinstance(api_key, str):
             self._set_entry_value(self.api_key_entry, api_key)
+
+        # If a named profile was active, apply it last so it wins over stale state values.
+        llm_profile = state.get("llm_profile")
+        if isinstance(llm_profile, str) and llm_profile:
+            self.profile_combo.set(llm_profile)
+            self._on_profile_select(llm_profile)
 
         batch_size = state.get("batch_size")
         if isinstance(batch_size, str):
