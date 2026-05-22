@@ -15,6 +15,7 @@ class ReviewPanel(ctk.CTkFrame):
         self.on_action = on_action
         self.candidates: list[dict[str, str]] = []
         self._row_id_to_index: dict[str, int] = {}
+        self._active_keys: set[str] = set()
         self._build_ui()
 
     def _build_ui(self):
@@ -29,6 +30,15 @@ class ReviewPanel(ctk.CTkFrame):
             font=("", 11),
         )
         self.summary_label.pack(side="right")
+
+        self.activity_label = ctk.CTkLabel(
+            self,
+            text="Activity: Idle",
+            text_color=("gray45", "gray65"),
+            font=("", 11),
+            anchor="w",
+        )
+        self.activity_label.pack(fill="x", padx=12, pady=(0, 6))
 
         table_container = ctk.CTkFrame(self)
         table_container.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -51,6 +61,8 @@ class ReviewPanel(ctk.CTkFrame):
         self.tree.column("original", width=250, minwidth=180, stretch=True)
         self.tree.column("translated", width=250, minwidth=180, stretch=True)
         self.tree.tag_configure("suspect", background="#3f1d1d", foreground="#f8d7da")
+        self.tree.tag_configure("active", background="#1e3a8a", foreground="#dbeafe")
+        self.tree.tag_configure("suspect_active", background="#4c1d95", foreground="#f5d0fe")
 
         y_scroll = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(table_container, orient="horizontal", command=self.tree.xview)
@@ -139,15 +151,24 @@ class ReviewPanel(ctk.CTkFrame):
         self.start_button.configure(state="normal", fg_color="#2563eb")
         self.stop_button.configure(state="disabled", fg_color="#4b5563", hover_color="#6b7280")
 
+    def set_activity(self, message: str, is_busy: bool = False) -> None:
+        """Show current translation activity for review operations."""
+        color = "#22c55e" if is_busy else ("gray45", "gray65")
+        self.activity_label.configure(text=f"Activity: {message}", text_color=color)
+
+    def clear_activity(self) -> None:
+        """Reset activity indicator to idle."""
+        self.set_activity("Idle", is_busy=False)
+
     def set_rows(self, candidates: list[dict[str, str]], suspect_count: int) -> None:
         self.candidates = candidates
         self._row_id_to_index.clear()
+        self._active_keys = {k for k in self._active_keys if any(c.get("key") == k for c in candidates)}
 
         for row_id in self.tree.get_children():
             self.tree.delete(row_id)
 
         for idx, candidate in enumerate(candidates):
-            tags = ("suspect",) if candidate.get("suspect") == "true" else ()
             row_id = self.tree.insert(
                 "",
                 "end",
@@ -159,9 +180,10 @@ class ReviewPanel(ctk.CTkFrame):
                     candidate.get("original", ""),
                     candidate.get("translated", ""),
                 ),
-                tags=tags,
             )
             self._row_id_to_index[row_id] = idx
+
+        self._apply_row_tags()
 
         self.summary_label.configure(
             text=f"Rows: {len(candidates)} | Suspects: {suspect_count}"
@@ -176,6 +198,40 @@ class ReviewPanel(ctk.CTkFrame):
             self.original_text.delete("1.0", "end")
             self.original_text.configure(state="disabled")
             self.manual_translation.delete("1.0", "end")
+
+    def set_active_keys(self, keys: list[str]) -> None:
+        """Highlight rows that are currently being translated."""
+        self._active_keys = {str(k).strip() for k in keys if str(k).strip()}
+        self._apply_row_tags()
+
+    def clear_active_keys(self) -> None:
+        """Clear active translation row highlights."""
+        self._active_keys.clear()
+        self._apply_row_tags()
+
+    def _apply_row_tags(self) -> None:
+        """Apply visual tags based on suspect and active state."""
+        for row_id in self.tree.get_children():
+            values = self.tree.item(row_id, "values")
+            key = str(values[0]).strip() if values else ""
+            idx = self._row_id_to_index.get(row_id)
+            is_suspect = (
+                idx is not None
+                and 0 <= idx < len(self.candidates)
+                and self.candidates[idx].get("suspect") == "true"
+            )
+            is_active = bool(key) and key in self._active_keys
+
+            if is_suspect and is_active:
+                tags = ("suspect_active",)
+            elif is_active:
+                tags = ("active",)
+            elif is_suspect:
+                tags = ("suspect",)
+            else:
+                tags = ()
+
+            self.tree.item(row_id, tags=tags)
 
     def _selected_row_id(self) -> str | None:
         selected = self.tree.selection()

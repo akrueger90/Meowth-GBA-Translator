@@ -99,9 +99,7 @@ class MeowthGUI(ctk.CTk):
         if action == "llm_selected":
             selected_keys = payload.get("selected_keys", []) if isinstance(payload, dict) else []
             if selected_keys:
-                retried, improved = self._retry_selected_entries(translated_path, selected_keys)
-                self.log_view.append("info", f"LLM translated {retried} selected entries ({improved} improved).")
-                self._refresh_review_panel(silent=False)
+                self._start_review_job("llm_selected", translated_path, selected_keys)
             return
 
         if action == "manual_save":
@@ -115,20 +113,20 @@ class MeowthGUI(ctk.CTk):
         if action == "resume_from_row":
             start_key = payload.get("start_key") if isinstance(payload, dict) else None
             if isinstance(start_key, str) and start_key:
-                processed = self._resume_translation_from_key(translated_path, start_key)
-                self.log_view.append("info", f"Resumed translation from {start_key}: {processed} entries processed.")
-                self._refresh_review_panel(silent=False)
+                self._start_review_job("resume_from_row", translated_path, start_key)
             return
 
     def _auto_refresh_review_panel(self):
         """Keep embedded review panel in sync while translation is active."""
         try:
-            if self.is_running:
+            # Refresh less aggressively while background work is active to keep
+            # the main Tk loop responsive under heavy JSON/log traffic.
+            if not self.is_running:
                 self._refresh_review_panel(silent=True)
         except Exception as exc:
             self._debug(f"Auto refresh review failed: {exc}")
         finally:
-            self.after(1200, self._auto_refresh_review_panel)
+            self.after(1500, self._auto_refresh_review_panel)
 
     def _runs_root(self, work_dir: Path) -> Path:
         return work_dir / "runs"
@@ -318,7 +316,9 @@ class MeowthGUI(ctk.CTk):
 
     def _process_ui_queue(self):
         """Drain cross-thread UI tasks from worker threads on the Tk main thread."""
-        while True:
+        processed = 0
+        max_per_tick = 30
+        while processed < max_per_tick:
             try:
                 func, args, kwargs = self._ui_queue.get_nowait()
             except queue.Empty:
@@ -329,8 +329,11 @@ class MeowthGUI(ctk.CTk):
             except Exception as exc:
                 self._debug(f"UI queue task failed: {exc}")
                 self._debug(traceback.format_exc())
+            finally:
+                processed += 1
 
-        self.after(16, self._process_ui_queue)
+        delay_ms = 1 if not self._ui_queue.empty() else 16
+        self.after(delay_ms, self._process_ui_queue)
 
     def _debug(self, message: str):
         """Write diagnostics for thread/debug-session analysis."""
@@ -430,6 +433,7 @@ class MeowthGUI(ctk.CTk):
         self.progress_view.reset()
         self.log_view.append("info", "Starting translation...")
         self.log_view.append("info", f"Debug log: {self.debug_log_path}")
+        self.review_panel.set_activity("Full translation running", is_busy=True)
 
         self.is_running = True
         self.review_panel.set_run_state(True)
@@ -551,6 +555,83 @@ class MeowthGUI(ctk.CTk):
         callbacks = GUICallbacks(self, self.progress_view, self.log_view)
         self.engine = TranslationEngine(config, callbacks)
 
+    def _start_review_job(self, job_type: str, translated_path: Path, payload: Any) -> None:
+        """Run review translation actions off the Tk main thread."""
+        if self.is_running:
+            self.log_view.append("warning", "Translation is already running.")
+            return
+
+        self.is_running = True
+        self.review_panel.set_run_state(True)
+        self.review_panel.set_activity(f"{job_type} preparing...", is_busy=True)
+        self.log_view.append("info", f"Starting {job_type} in background...")
+        self._debug(f"Review job start: type={job_type}")
+
+        thread = threading.Thread(
+            target=self._run_review_job,
+            args=(job_type, translated_path, payload),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_review_job(self, job_type: str, translated_path: Path, payload: Any) -> None:
+        """Background worker for llm_selected and resume_from_row actions."""
+        def _report_activity(message: str, active_keys: list[str] | None = None) -> None:
+            self.call_on_main_thread(self.review_panel.set_activity, message, True)
+            if active_keys is not None:
+                self.call_on_main_thread(self.review_panel.set_active_keys, active_keys)
+
+        try:
+            if job_type == "llm_selected":
+                selected_keys = payload if isinstance(payload, list) else []
+                retried, improved = self._retry_selected_entries(
+                    translated_path,
+                    selected_keys,
+                    progress_callback=_report_activity,
+                )
+                self.call_on_main_thread(
+                    self.log_view.append,
+                    "info",
+                    f"LLM translated {retried} selected entries ({improved} improved).",
+                )
+            elif job_type == "resume_from_row":
+                start_key = str(payload)
+                processed = self._resume_translation_from_key(
+                    translated_path,
+                    start_key,
+                    progress_callback=_report_activity,
+                )
+                self.call_on_main_thread(
+                    self.log_view.append,
+                    "info",
+                    f"Resumed translation from {start_key}: {processed} entries processed.",
+                )
+            else:
+                self.call_on_main_thread(
+                    self.log_view.append,
+                    "warning",
+                    f"Unknown review job: {job_type}",
+                )
+        except TranslationStoppedError:
+            self.call_on_main_thread(self.log_view.append, "warning", "Review job stopped by user.")
+        except Exception as exc:
+            self._debug(f"Review job failed: {exc}")
+            self._debug(traceback.format_exc())
+            self.call_on_main_thread(self.log_view.append, "error", f"Review job failed: {exc}")
+        finally:
+            self.call_on_main_thread(self._finish_review_job)
+
+    def _finish_review_job(self) -> None:
+        """Finalize review action state on the UI thread."""
+        try:
+            self._refresh_review_panel(silent=False)
+        finally:
+            self.is_running = False
+            self.review_panel.set_run_state(False)
+            self.review_panel.clear_active_keys()
+            self.review_panel.clear_activity()
+            self._debug("Review job finished")
+
     def _apply_manual_translation(self, translated_path: Path, key: str, translated: str) -> bool:
         data = json.loads(translated_path.read_text(encoding="utf-8"))
         indexed = self._index_translation_entries(data)
@@ -564,7 +645,12 @@ class MeowthGUI(ctk.CTk):
         )
         return True
 
-    def _resume_translation_from_key(self, translated_path: Path, start_key: str) -> int:
+    def _resume_translation_from_key(
+        self,
+        translated_path: Path,
+        start_key: str,
+        progress_callback: Callable[[str, list[str] | None], None] | None = None,
+    ) -> int:
         data = json.loads(translated_path.read_text(encoding="utf-8"))
         indexed = self._index_translation_entries(data)
         ordered_keys = list(indexed.keys())
@@ -574,29 +660,43 @@ class MeowthGUI(ctk.CTk):
         start_idx = ordered_keys.index(start_key)
         remaining_keys = ordered_keys[start_idx:]
 
-        table_entries: list[dict] = []
-        free_entries: list[dict] = []
+        table_items: list[tuple[str, dict]] = []
+        free_items: list[tuple[str, dict]] = []
         for key in remaining_keys:
             item = indexed[key]
             entry = item["entry"]
             if str(entry.get("translated", "")).strip():
                 continue
             if item["source"] == "table":
-                table_entries.append(entry)
+                table_items.append((key, entry))
             else:
-                free_entries.append(entry)
+                free_items.append((key, entry))
 
         processed = 0
         batch_size = max(1, int(getattr(self.engine.config, "batch_size", 30)))
+        table_total_batches = (len(table_items) + batch_size - 1) // batch_size
+        free_total_batches = (len(free_items) + batch_size - 1) // batch_size
 
-        for i in range(0, len(table_entries), batch_size):
-            chunk = table_entries[i:i + batch_size]
-            self.engine._translate_table_llm_batch(chunk)
+        for batch_idx, i in enumerate(range(0, len(table_items), batch_size), start=1):
+            chunk = table_items[i:i + batch_size]
+            chunk_keys = [key for key, _ in chunk]
+            if progress_callback and chunk_keys:
+                progress_callback(
+                    f"Resume table {batch_idx}/{table_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
+                    chunk_keys,
+                )
+            self.engine._translate_table_llm_batch([entry for _, entry in chunk])
             processed += len(chunk)
 
-        for i in range(0, len(free_entries), batch_size):
-            chunk = free_entries[i:i + batch_size]
-            self.engine._translate_free_batch(chunk)
+        for batch_idx, i in enumerate(range(0, len(free_items), batch_size), start=1):
+            chunk = free_items[i:i + batch_size]
+            chunk_keys = [key for key, _ in chunk]
+            if progress_callback and chunk_keys:
+                progress_callback(
+                    f"Resume free {batch_idx}/{free_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
+                    chunk_keys,
+                )
+            self.engine._translate_free_batch([entry for _, entry in chunk])
             processed += len(chunk)
 
         translated_path.write_text(
@@ -698,13 +798,18 @@ class MeowthGUI(ctk.CTk):
 
         return candidates, suspect_count
 
-    def _retry_selected_entries(self, translated_path: Path, selected_keys: list[str]) -> tuple[int, int]:
+    def _retry_selected_entries(
+        self,
+        translated_path: Path,
+        selected_keys: list[str],
+        progress_callback: Callable[[str, list[str] | None], None] | None = None,
+    ) -> tuple[int, int]:
         """Retry selected entries in-place using engine translation helpers."""
         data = json.loads(translated_path.read_text(encoding="utf-8"))
         indexed = self._index_translation_entries(data)
 
-        table_entries: list[dict] = []
-        free_entries: list[dict] = []
+        table_items: list[tuple[str, dict]] = []
+        free_items: list[tuple[str, dict]] = []
         before_state: dict[str, str] = {}
 
         for key in selected_keys:
@@ -714,14 +819,33 @@ class MeowthGUI(ctk.CTk):
             entry = item["entry"]
             before_state[key] = str(entry.get("translated", ""))
             if item["source"] == "table":
-                table_entries.append(entry)
+                table_items.append((key, entry))
             else:
-                free_entries.append(entry)
+                free_items.append((key, entry))
 
-        if table_entries:
-            self.engine._translate_table_llm_batch(table_entries)
-        if free_entries:
-            self.engine._translate_free_batch(free_entries)
+        batch_size = max(1, int(getattr(self.engine.config, "batch_size", 30)))
+        table_total_batches = (len(table_items) + batch_size - 1) // batch_size
+        free_total_batches = (len(free_items) + batch_size - 1) // batch_size
+
+        for batch_idx, i in enumerate(range(0, len(table_items), batch_size), start=1):
+            chunk = table_items[i:i + batch_size]
+            chunk_keys = [key for key, _ in chunk]
+            if progress_callback and chunk_keys:
+                progress_callback(
+                    f"LLM selected table {batch_idx}/{table_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
+                    chunk_keys,
+                )
+            self.engine._translate_table_llm_batch([entry for _, entry in chunk])
+
+        for batch_idx, i in enumerate(range(0, len(free_items), batch_size), start=1):
+            chunk = free_items[i:i + batch_size]
+            chunk_keys = [key for key, _ in chunk]
+            if progress_callback and chunk_keys:
+                progress_callback(
+                    f"LLM selected free {batch_idx}/{free_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
+                    chunk_keys,
+                )
+            self.engine._translate_free_batch([entry for _, entry in chunk])
 
         improved = 0
         for key in before_state:
@@ -765,6 +889,7 @@ class MeowthGUI(ctk.CTk):
         """Stop the translation process."""
         if self.engine and self.is_running:
             self.log_view.append("warning", "Stopping translation...")
+            self.review_panel.set_activity("Stopping...", is_busy=True)
             self._stop_event.set()
             self.engine.request_stop()
             self.review_panel.set_run_state(True)
@@ -773,6 +898,8 @@ class MeowthGUI(ctk.CTk):
         """Reset button states."""
         self.is_running = False
         self.review_panel.set_run_state(False)
+        self.review_panel.clear_active_keys()
+        self.review_panel.clear_activity()
 
 
 def main():
