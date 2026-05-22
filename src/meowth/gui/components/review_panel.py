@@ -81,6 +81,7 @@ class ReviewPanel(ctk.CTkFrame):
 
         ctk.CTkButton(controls, text="Refresh", width=90, command=self._refresh).pack(side="left")
         ctk.CTkButton(controls, text="Select Suspects", width=120, command=self._select_suspects).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(controls, text="Next Untranslated", width=140, command=self._select_next_untranslated).pack(side="left", padx=(6, 0))
         ctk.CTkButton(controls, text="Clear", width=90, command=self._clear_selection).pack(side="left", padx=(6, 0))
 
         self.start_button = ctk.CTkButton(
@@ -248,6 +249,32 @@ class ReviewPanel(ctk.CTkFrame):
 
     def _clear_selection(self):
         self.tree.selection_remove(self.tree.selection())
+
+    def _select_next_untranslated(self):
+        rows = list(self.tree.get_children())
+        if not rows:
+            return
+
+        selected = self._selected_row_id()
+        start_index = -1
+        if selected in rows:
+            start_index = rows.index(selected)
+
+        for offset in range(1, len(rows) + 1):
+            idx = (start_index + offset) % len(rows)
+            row_id = rows[idx]
+            values = self.tree.item(row_id, "values")
+            translated = str(values[4]).strip() if values and len(values) > 4 else ""
+            if translated:
+                continue
+
+            self.tree.selection_set(row_id)
+            self.tree.focus(row_id)
+            self.tree.see(row_id)
+            self._on_selection_changed()
+            return
+
+        messagebox.showinfo("No Untranslated Rows", "All rows already have translated text.")
 
     def _llm_selected(self):
         selected_keys = self._selected_keys()
