@@ -65,7 +65,7 @@ class MeowthGUI(ctk.CTk):
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self.config_form.load_state()
-        self._log_resumable_hint()
+        self._autoload_resumable_run()
         self.after(16, self._process_ui_queue)
         self.after(1200, self._auto_refresh_review_panel)
         self._debug("GUI initialized")
@@ -207,6 +207,34 @@ class MeowthGUI(ctk.CTk):
         if resumables:
             latest = resumables[0]
             self._debug(f"Found {len(resumables)} resumable run(s), latest={latest.name}")
+
+    def _autoload_resumable_run(self) -> None:
+        """Load the latest resumable run into the review panel at startup."""
+        try:
+            config = self.config_form.get_config()
+            resumables = self._find_resumable_runs(config.work_dir)
+            if not resumables:
+                return
+
+            latest = resumables[0]
+            self._active_run_dir = latest
+            self._refresh_review_panel(silent=True)
+
+            translated_path = self._run_translated(latest)
+            total, pending = self._count_pending_entries(translated_path)
+            if total > 0:
+                summary = f"{pending}/{total} pending"
+            else:
+                summary = "no translated file yet"
+
+            self.log_view.append("info", f"Loaded existing run: {latest.name} ({summary}).")
+            self._debug(
+                f"Auto-loaded resumable run at startup: {latest} "
+                f"(pending={pending}, total={total})"
+            )
+        except Exception as exc:
+            # Startup auto-load should never block opening the GUI.
+            self._debug(f"Startup auto-load skipped due to error: {exc}")
 
     def _ask_resume_or_new(self, config) -> tuple[str, Path | None]:
         resumables = self._find_resumable_runs(config.work_dir)
