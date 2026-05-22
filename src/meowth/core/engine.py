@@ -1,8 +1,10 @@
 """Core translation engine - refactored from Pipeline with callback support."""
 
 import json
+import os
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from ..charmap import Charmap
@@ -15,7 +17,7 @@ from ..pcs_codes import FD_MACROS
 from ..rom_writer import RomWriter
 from ..text_wrap import wrap_text
 from ..translator import Translator
-from ..translator import LLMAuthenticationError
+from ..translator import LLMAuthenticationError, TranslationStoppedError
 from .callbacks import TranslationCallbacks
 from .config import TranslationConfig
 
@@ -178,6 +180,7 @@ class TranslationEngine:
         charmap: Charmap | None = None,
         glossary: Glossary | None = None,
         translator: Translator | None = None,
+        stop_event: threading.Event | None = None,
     ):
         """Initialize the translation engine.
 
@@ -187,9 +190,11 @@ class TranslationEngine:
             charmap: Character mapping (auto-created if None)
             glossary: Glossary for term translation (auto-created if None)
             translator: LLM translator (auto-created if None)
+            stop_event: Optional threading.Event to signal cancellation
         """
         self.config = config
         self.callbacks = callbacks or TranslationCallbacks()
+        self._stop_event: threading.Event = stop_event or threading.Event()
 
         self.charmap = charmap or Charmap(target_lang=config.target_lang)
         self.glossary = glossary or Glossary(
@@ -205,11 +210,41 @@ class TranslationEngine:
             api_key_env=config.api_key_env,
             model=config.model,
             cache_dir=config.work_dir / "cache",
+            stop_event=self._stop_event,
         )
 
     def _log(self, level: str, message: str):
         """Internal helper to send log messages via callbacks."""
         self.callbacks.on_log(level, message)
+
+    def _check_stop(self) -> None:
+        """Raise TranslationStoppedError if a stop has been requested."""
+        if self._stop_event.is_set():
+            raise TranslationStoppedError("Translation stopped by user")
+
+    def request_stop(self) -> None:
+        """Signal all workers and the translator to stop."""
+        self._stop_event.set()
+        if hasattr(self.translator, "_stop_event"):
+            self.translator._stop_event = self._stop_event
+
+    def _save_translation_snapshot(self, data: dict, output_path: Path) -> None:
+        """Write current translation state to disk atomically."""
+        import tempfile
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=output_path.parent, prefix=".snapshot_", suffix=".json"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            Path(tmp_path).replace(output_path)
+        except Exception:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
     def _get_effective_text_limit(self) -> int | None:
         """Return configured positive text limit, or None for no limit."""
@@ -290,27 +325,60 @@ class TranslationEngine:
             self._translate_free_batch(batch)
             return idx, batch
 
-        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
-            futures = {
-                executor.submit(process_batch, (i, b)): i
+        executor = ThreadPoolExecutor(max_workers=self.config.max_workers)
+        try:
+            pending_futures = {
+                executor.submit(process_batch, (i, b))
                 for i, b in enumerate(batches)
             }
-            for future in as_completed(futures):
-                done_count += 1
-                idx, batch = future.result()
-                self._log("info", Messages.BATCH_COMPLETE.format(
-                    current=done_count, total=total, batch_id=idx + 1
-                ))
-                sample = next((e for e in batch if e.get("translated")), None)
-                if sample:
-                    print(f"  e.g. {sample['original']!r} → {sample['translated']!r}")
-                self.callbacks.on_progress("translate", done_count, total,
-                    f"Batch {idx + 1} completed")
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+            while pending_futures:
+                self._check_stop()
+                done_futures, pending_futures = wait(
+                    pending_futures,
+                    timeout=0.2,
+                    return_when=FIRST_COMPLETED,
+                )
+
+                for future in done_futures:
+                    try:
+                        idx, batch = future.result()
+                    except TranslationStoppedError:
+                        self._save_translation_snapshot(data, output_path)
+                        self.request_stop()
+                        for pending in pending_futures:
+                            pending.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception:
+                        self._save_translation_snapshot(data, output_path)
+                        self.request_stop()
+                        for pending in pending_futures:
+                            pending.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+
+                    done_count += 1
+                    self._log("info", Messages.BATCH_COMPLETE.format(
+                        current=done_count, total=total, batch_id=idx + 1
+                    ))
+                    sample = next((e for e in batch if e.get("translated")), None)
+                    if sample:
+                        print(f"  e.g. {sample['original']!r} → {sample['translated']!r}")
+                    self.callbacks.on_progress("translate", done_count, total,
+                        f"Batch {idx + 1} completed")
+
+                    # Save completed batch progress continuously for resume/stop.
+                    self._save_translation_snapshot(data, output_path)
+        except TranslationStoppedError:
+            self._save_translation_snapshot(data, output_path)
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            if not self._stop_event.is_set():
+                executor.shutdown(wait=True)
+
+        self._save_translation_snapshot(data, output_path)
         return output_path
 
     def _translate_table(self, table: dict):

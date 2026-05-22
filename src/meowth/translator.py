@@ -18,6 +18,10 @@ class LLMAuthenticationError(RuntimeError):
     """Raised when the configured LLM provider rejects authentication."""
 
 
+class TranslationStoppedError(RuntimeError):
+    """Raised when the user requests a translation stop."""
+
+
 def _get_default_cache_dir() -> Path:
     """Get default cache directory — writable in both dev and PyInstaller bundle."""
     if getattr(sys, '_MEIPASS', None):  # Running in PyInstaller bundle
@@ -57,7 +61,7 @@ PROMPT_TEMPLATES = {
 1. 控制码占位符（如 {{C0}}, {{C1}} 等）必须原样保留，不得修改、删除或增加
    - 这些是游戏的控制码（换行、翻页、颜色等），改动会导致游戏崩溃
 2. 占位符的数量和顺序必须与原文完全一致
-3. 使用宝可梦官方简体中文译名（皮卡丘、小火龙、妙蛙种子等）
+3. 术语表是强制约束：当原文出现术语表中的词条时，必须使用术语表给出的目标译名
 4. POKéMON / Pokémon 翻译为"宝可梦"
 5. 保持游戏对话的自然口语风格
 6. 人名地名等专有名词如果有官方译名则使用官方译名，否则音译
@@ -66,6 +70,9 @@ PROMPT_TEMPLATES = {
 9. 翻译时不要插入任何换行符，输出纯文本即可，系统会自动排版
 10. 保留所有 \\. 等待标记的位置，它们表示游戏中的停顿效果
 11. 保留段落分隔（空行），它们表示游戏中的翻页
+12. 宝可梦名、招式名、道具名、特性名必须翻译为中文；若有已知官方译名，不得保留英文原词
+13. 上述规则同样适用于全大写词（例如全大写的宝可梦名也必须翻译）
+14. 输出前自检：术语表中的已知宝可梦名不得以英文形式残留
 
 重要：占位符代表游戏运行时会替换的变量（如玩家名、劲敌名等），翻译时不要用人名替代周围的 rival 等词。
 - "rival" 一词翻译为"劲敌"，不要翻译为具体人名（如小茂）
@@ -88,7 +95,7 @@ Core rules:
 1. Control code placeholders (like {{C0}}, {{C1}}, etc.) MUST be preserved exactly - do not modify, delete, or add any
    - These are game control codes (line breaks, page breaks, colors, etc.) and changing them will crash the game
 2. The number and order of placeholders must match the original text exactly
-3. Use official Pokemon terminology from the glossary provided
+3. Glossary terms are mandatory: when a source term appears in input, you MUST use the glossary target translation exactly
 4. Maintain the natural conversational style of game dialogue
 5. For proper nouns (character names, place names), use official translations if available in the glossary, otherwise transliterate
 6. Return only the translation, no explanations or notes
@@ -96,6 +103,9 @@ Core rules:
 8. Do not insert any line breaks in your translation - output plain text, the system will handle formatting
 9. Preserve all \\. pause markers, they represent in-game pauses
 10. Preserve paragraph breaks (blank lines), they represent page breaks in the game
+11. Translate Pokemon species names, move names, item names, and abilities to {target_lang}; never keep these terms in the source language when a known translation exists
+12. This also applies to ALL-CAPS terms in dialogue (for example, an all-caps species name must still be translated)
+13. Before returning, self-check that no known source-language Pokemon species name remains untranslated in the output
 
 Important: Placeholders represent variables that will be replaced at runtime (player name, rival name, etc.). Do not replace words like "rival" with specific names.
 - For example, "your rival {{C0}}" should be translated preserving the word "rival" in {target_lang}, not replaced with a specific character name
@@ -126,6 +136,7 @@ class Translator:
         base_url: str | None = None,
         api_key_env: str | None = None,
         provider: str | None = None,
+        stop_event: threading.Event | None = None,
     ):
         # Resolve provider preset
         self.provider = provider or ""
@@ -141,6 +152,7 @@ class Translator:
         env_var = api_key_env or "DEEPSEEK_API_KEY"
         self.api_key = api_key or os.environ.get(env_var, "")
 
+        self._stop_event = stop_event
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_lock = threading.Lock()
@@ -166,6 +178,27 @@ class Translator:
                 "{source_lang}", source_name_local
             ).replace("{target_lang}", target_name_local),
         }
+
+    def _check_stop(self) -> None:
+        if self._stop_event and self._stop_event.is_set():
+            raise TranslationStoppedError("Translation stopped by user")
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        end_at = time.time() + max(0.0, seconds)
+        while True:
+            self._check_stop()
+            remaining = end_at - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.25, remaining))
+
+    def _acquire_groq_gate_interruptibly(self) -> None:
+        """Acquire shared Groq gate while still honoring stop requests."""
+        while True:
+            self._check_stop()
+            if Translator._groq_gate.acquire(timeout=0.25):
+                return
+
 
     def _cache_key(self, request_data: dict) -> str:
         content = json.dumps(request_data, sort_keys=True, ensure_ascii=False)
@@ -298,11 +331,12 @@ class Translator:
                 if is_groq:
                     # Serialize Groq calls across workers and honor shared cooldown
                     # to avoid synchronized 429 storms on free-tier TPM limits.
-                    with Translator._groq_gate:
+                    self._acquire_groq_gate_interruptibly()
+                    try:
                         now = time.time()
                         wait = Translator._groq_next_allowed_at - now
                         if wait > 0:
-                            time.sleep(wait)
+                            self._interruptible_sleep(wait)
 
                         response = httpx.post(
                             f"{self.base_url}/chat/completions",
@@ -318,6 +352,8 @@ class Translator:
                         # Slightly slower steady flow is faster overall than
                         # repeated 429 backoff storms.
                         Translator._groq_next_allowed_at = time.time() + 2.5
+                    finally:
+                        Translator._groq_gate.release()
                 else:
                     response = httpx.post(
                         f"{self.base_url}/chat/completions",
@@ -331,7 +367,13 @@ class Translator:
                 response.raise_for_status()
                 return response.json()["choices"][0]["message"]["content"]
             except httpx.HTTPStatusError as e:
-                if e.response.status_code in {401, 403}:
+                try:
+                    detail = e.response.json()
+                except Exception:
+                    detail = e.response.text
+
+                detail_text = json.dumps(detail, ensure_ascii=False) if not isinstance(detail, str) else detail
+                if self._is_auth_http_error(e.response.status_code, detail_text):
                     raise LLMAuthenticationError(self._format_auth_error(e)) from e
                 if e.response.status_code == 429 and attempt < max_retries - 1:
                     wait = self._extract_retry_delay_seconds(e.response)
@@ -347,13 +389,9 @@ class Translator:
                         f"[Rate limit hit ({self.base_url}), retrying in {wait:.2f}s "
                         f"({attempt + 1}/{max_retries})]"
                     )
-                    time.sleep(wait)
+                    self._interruptible_sleep(wait)
                     continue
                 # For other HTTP errors, include the response body in the message
-                try:
-                    detail = e.response.json()
-                except Exception:
-                    detail = e.response.text
                 raise RuntimeError(
                     f"HTTP {e.response.status_code} from {self.base_url}: {detail}"
                 ) from e
@@ -364,7 +402,7 @@ class Translator:
                     print(Messages.API_REQUEST_FAILED.format(
                         error=e, wait=wait, attempt=attempt+1, max_retries=max_retries
                     ))
-                    time.sleep(wait)
+                    self._interruptible_sleep(wait)
                 else:
                     raise
 
@@ -413,6 +451,25 @@ class Translator:
         if detail:
             message = f"{message} {detail}"
         return message
+
+    def _is_auth_http_error(self, status_code: int, detail: str) -> bool:
+        """Detect provider auth/key errors, including APIs returning HTTP 400."""
+        if status_code in {401, 403}:
+            return True
+
+        detail_lc = detail.lower()
+        auth_markers = (
+            "invalid api key",
+            "api key not valid",
+            "incorrect api key",
+            "authentication",
+            "unauthorized",
+            "permission denied",
+            "access denied",
+            "invalid credentials",
+            "credential",
+        )
+        return any(marker in detail_lc for marker in auth_markers)
 
     def _translate_individually(
         self, texts: list[str], glossary_context: str = ""

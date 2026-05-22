@@ -40,14 +40,40 @@ class LogView(ctk.CTkFrame):
         self.textbox.tag_config("error", foreground="#f87171")
         self.textbox.tag_config("timestamp", foreground="#6b7280")
 
+        self._entry_count = 0
+        self._max_entries = 1200
+        self._trim_to_entries = 900
+
+    def _trim_if_needed(self) -> None:
+        if self._entry_count <= self._max_entries:
+            return
+        remove_count = self._entry_count - self._trim_to_entries
+        if remove_count > 0:
+            self.textbox.delete("1.0", f"{remove_count + 1}.0")
+            self._entry_count = self._trim_to_entries
+
     def append(self, level: str, message: str):
         """Append a log message."""
         ts = datetime.now().strftime("%H:%M:%S")
         self.textbox.insert("end", f"[{ts}] ", "timestamp")
         tag = level if level in ("info", "warning", "error") else "info"
         self.textbox.insert("end", f"{message}\n", tag)
+        self._entry_count += 1
+        self._trim_if_needed()
+        self.textbox.see("end")
+
+    def append_many(self, entries: list[tuple[str, str]]) -> None:
+        """Append multiple log messages in one UI pass."""
+        for level, message in entries:
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.textbox.insert("end", f"[{ts}] ", "timestamp")
+            tag = level if level in ("info", "warning", "error") else "info"
+            self.textbox.insert("end", f"{message}\n", tag)
+            self._entry_count += 1
+        self._trim_if_needed()
         self.textbox.see("end")
 
     def clear(self):
         """Clear all log entries."""
         self.textbox.delete("1.0", "end")
+        self._entry_count = 0
