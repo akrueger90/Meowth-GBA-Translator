@@ -169,6 +169,7 @@ class ConfigForm(ctk.CTkFrame):
         )
         self.provider.set("deepseek")
         self.provider.bind("<<ComboboxSelected>>", lambda e: self._on_provider_change(self.provider.get()))
+        self.provider.bind("<<ComboboxSelected>>", lambda e: self._auto_save_config(), add=True)
         self.provider.pack(fill="x")
 
         model_frame = ctk.CTkFrame(pm_row, fg_color="transparent")
@@ -177,6 +178,8 @@ class ConfigForm(ctk.CTkFrame):
         self.model_entry = ctk.CTkEntry(model_frame, height=32, corner_radius=8)
         self.model_entry.insert(0, PROVIDER_PRESETS["deepseek"][1])
         self.model_entry.pack(fill="x")
+        # Bind to focus-out event to save when user finishes editing the model
+        self.model_entry.bind("<FocusOut>", lambda e: self._auto_save_config())
 
         # --- API Key ---
         ctk.CTkLabel(inner, text="API Key", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
@@ -187,6 +190,8 @@ class ConfigForm(ctk.CTkFrame):
             corner_radius=8,
         )
         self.api_key_entry.pack(fill="x", pady=(0, 8))
+        # Bind to focus-out event to save when user finishes editing the API key
+        self.api_key_entry.bind("<FocusOut>", lambda e: self._auto_save_config())
 
         # --- Advanced (collapsible) ---
         self.advanced_visible = False
@@ -241,6 +246,8 @@ class ConfigForm(ctk.CTkFrame):
             self._set_entry_value(self.model_entry, model)
         api_key = profile.get("api_key", "")
         self._set_entry_value(self.api_key_entry, api_key)
+        # Auto-save after loading a profile
+        self._auto_save_config()
 
     def _save_profile(self) -> None:
         """Save current provider/model/api_key under the profile name in the combobox."""
@@ -255,6 +262,14 @@ class ConfigForm(ctk.CTkFrame):
         save_llm_profiles(self._profiles)
         self.profile_combo.configure(values=sorted(self._profiles.keys()))
         self.profile_combo.set(name)
+
+    def _auto_save_config(self) -> None:
+        """Auto-save the current configuration whenever LLM config changes."""
+        try:
+            self.save_state()
+        except Exception as exc:
+            # Silently ignore save errors to avoid disrupting the user
+            pass
 
     def _on_provider_change(self, provider_name: str):
         """Update default model when provider changes."""
