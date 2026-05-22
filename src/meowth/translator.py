@@ -131,6 +131,7 @@ class Translator:
         api_key_env: str | None = None,
         provider: str | None = None,
         stop_event: threading.Event | None = None,
+        game_context: str = "",
     ):
         # Resolve provider preset
         self.provider = provider or ""
@@ -172,6 +173,8 @@ class Translator:
                 "{source_lang}", source_name_local
             ).replace("{target_lang}", target_name_local),
         }
+        if game_context and game_context.strip():
+            self.prompts["system"] += f"\n\nGame context provided by the user:\n{game_context.strip()}"
 
     def _check_stop(self) -> None:
         if self._stop_event and self._stop_event.is_set():

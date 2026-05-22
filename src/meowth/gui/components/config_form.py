@@ -193,6 +193,22 @@ class ConfigForm(ctk.CTkFrame):
         # Bind to focus-out event to save when user finishes editing the API key
         self.api_key_entry.bind("<FocusOut>", lambda e: self._auto_save_config())
 
+        # --- Game Context ---
+        ctk.CTkLabel(inner, text="Game Context (optional)", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
+        ctk.CTkLabel(
+            inner,
+            text="Describe the game so the LLM can translate more accurately (setting, tone, character names, etc.)",
+            font=("", 10),
+            text_color=("gray45", "gray55"),
+            wraplength=380,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 4))
+        self.game_context_entry = ctk.CTkTextbox(
+            inner, height=72, corner_radius=8, wrap="word",
+        )
+        self.game_context_entry.pack(fill="x", pady=(0, 8))
+        self.game_context_entry.bind("<FocusOut>", lambda e: self._auto_save_config())
+
         # --- Advanced (collapsible) ---
         self.advanced_visible = False
         self.advanced_button = ctk.CTkButton(
@@ -337,6 +353,7 @@ class ConfigForm(ctk.CTkFrame):
             "batch_size": self.batch_size.get().strip(),
             "max_workers": self.max_workers.get().strip(),
             "test_limit_texts": self.test_limit_texts.get().strip(),
+            "game_context": self.game_context_entry.get("1.0", "end-1c"),
             "advanced_visible": self.advanced_visible,
         }
 
@@ -389,6 +406,11 @@ class ConfigForm(ctk.CTkFrame):
         if isinstance(test_limit_texts, str):
             self._set_entry_value(self.test_limit_texts, test_limit_texts)
 
+        game_context = state.get("game_context")
+        if isinstance(game_context, str):
+            self.game_context_entry.delete("1.0", "end")
+            self.game_context_entry.insert("1.0", game_context)
+
         advanced_visible = state.get("advanced_visible")
         if isinstance(advanced_visible, bool) and advanced_visible != self.advanced_visible:
             self._toggle_advanced()
@@ -431,6 +453,7 @@ class ConfigForm(ctk.CTkFrame):
             max_workers=int(self.max_workers.get()) if self.max_workers.get().isdigit() else 10,
             test_limit_texts=test_limit,
             use_env_test_limit=False,
+            game_context=self.game_context_entry.get("1.0", "end-1c").strip(),
             rom_path=Path(self.rom_entry.get()) if self.rom_entry.get() else None,
             output_dir=output_dir,
             work_dir=work_dir,

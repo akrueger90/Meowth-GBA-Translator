@@ -218,6 +218,7 @@ class TranslationEngine:
             model=config.model,
             cache_dir=config.work_dir / "cache",
             stop_event=self._stop_event,
+            game_context=config.game_context,
         )
 
     def request_stop(self) -> None:

@@ -65,6 +65,9 @@ class TranslationConfig:
     # Game detection (auto-detected if not specified)
     game: str = "firered"
 
+    # Optional context about the game to help the LLM translate better
+    game_context: str = ""
+
     @classmethod
     def from_toml(cls, path: Path) -> "TranslationConfig":
         """Load configuration from a meowth.toml file.
