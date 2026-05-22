@@ -21,7 +21,7 @@ from .components import ConfigForm, LogView, ProgressView, ReviewPanel
 
 
 _APP_NAME = "Meowth Translator"
-_SETTINGS_PANEL_WIDTH = 640
+_SETTINGS_PANEL_WIDTH = 520
 
 
 def _setup_macos_app_name() -> None:
@@ -47,8 +47,8 @@ class MeowthGUI(ctk.CTk):
         super().__init__()
 
         self.title(_APP_NAME)
-        self.geometry("880x800")
-        self.minsize(700, 620)
+        self.geometry("1600x920")
+        self.minsize(1280, 700)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
