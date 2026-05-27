@@ -298,6 +298,11 @@ class ConfigForm(ctk.CTkFrame):
             # Safer defaults reduce rate-limit failures.
             self._set_entry_value(self.batch_size, "6")
             self._set_entry_value(self.max_workers, "2")
+        elif provider_name == "openrouter":
+            # OpenRouter free-tier keys can also be easily throttled.
+            # Conservative defaults avoid immediate 429 storms.
+            self._set_entry_value(self.batch_size, "4")
+            self._set_entry_value(self.max_workers, "1")
 
     def _browse_rom(self):
         """Open file dialog to select ROM."""
@@ -428,6 +433,16 @@ class ConfigForm(ctk.CTkFrame):
         provider = self.provider.get()
         preset = PROVIDER_PRESETS.get(provider)
         api_key = self.api_key_entry.get().strip()
+        model_value = self.model_entry.get().strip() or (preset[1] if preset else None)
+        batch_value = int(self.batch_size.get()) if self.batch_size.get().isdigit() else 30
+        workers_value = int(self.max_workers.get()) if self.max_workers.get().isdigit() else 10
+
+        # Safety guard for stale saved profiles/state: OpenRouter free-tier keys
+        # are easily throttled when old high-concurrency values are restored.
+        if provider == "openrouter":
+            workers_value = min(workers_value, 1)
+            batch_value = min(batch_value, 4)
+
         defaults = TranslationConfig()
 
         output_value = self.output_entry.get().strip()
@@ -446,11 +461,11 @@ class ConfigForm(ctk.CTkFrame):
             source_lang=self._lang_name_to_code(self.source_lang.get()),
             target_lang=self._lang_name_to_code(self.target_lang.get()),
             provider=provider if provider else None,
-            model=self.model_entry.get().strip() or (preset[1] if preset else None),
+            model=model_value,
             api_key_env=preset[2] if preset else None,
             api_key=api_key if api_key else None,
-            batch_size=int(self.batch_size.get()) if self.batch_size.get().isdigit() else 30,
-            max_workers=int(self.max_workers.get()) if self.max_workers.get().isdigit() else 10,
+            batch_size=batch_value,
+            max_workers=workers_value,
             test_limit_texts=test_limit,
             use_env_test_limit=False,
             game_context=self.game_context_entry.get("1.0", "end-1c").strip(),

@@ -45,7 +45,9 @@ PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
     "google":    ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash", "GOOGLE_API_KEY"),
     "groq":      ("https://api.groq.com/openai/v1",           "llama-3.3-70b-versatile", "GROQ_API_KEY"),
     "mistral":   ("https://api.mistral.ai/v1",                "mistral-large-latest", "MISTRAL_API_KEY"),
-    "openrouter":("https://openrouter.ai/api/v1",             "openai/gpt-4o",     "OPENROUTER_API_KEY"),
+    # Keep OpenRouter default model aligned with broad compatibility.
+    # Free-tier users should still pick an explicit :free model in UI.
+    "openrouter":("https://openrouter.ai/api/v1",             "openrouter/auto",   "OPENROUTER_API_KEY"),
     "siliconflow":("https://api.siliconflow.cn/v1",           "deepseek-ai/DeepSeek-V3", "SILICONFLOW_API_KEY"),
     "zhipu":     ("https://open.bigmodel.cn/api/paas/v4",     "glm-4-flash",       "ZHIPU_API_KEY"),
     "moonshot":  ("https://api.moonshot.cn/v1",               "moonshot-v1-8k",    "MOONSHOT_API_KEY"),
@@ -119,6 +121,9 @@ class Translator:
     # Shared Groq throttle across all Translator instances/threads.
     _groq_gate = threading.Lock()
     _groq_next_allowed_at = 0.0
+    # Shared OpenRouter throttle to avoid bursty 429s on free-tier usage.
+    _openrouter_gate = threading.Lock()
+    _openrouter_next_allowed_at = 0.0
 
     def __init__(
         self,
@@ -224,6 +229,17 @@ class Translator:
         """
         self._check_stop()
 
+        is_openrouter = "openrouter.ai" in self.base_url
+        is_openrouter_free_model = is_openrouter and self.model.strip().endswith(":free")
+
+        if is_openrouter_free_model and len(texts) > 2:
+            # Keep OpenRouter free-tier calls small to reduce per-request token
+            # spikes and avoid repeated 429 backoff in review/resume flows.
+            merged: list[str] = []
+            for i in range(0, len(texts), 2):
+                merged.extend(self.translate_batch(texts[i : i + 2], glossary_context))
+            return merged
+
         if "groq" in self.base_url and len(texts) > 6:
             # Free-tier Groq has low TPM limits. Splitting large batches keeps
             # per-request token usage lower and reduces 429 bursts.
@@ -259,6 +275,9 @@ class Translator:
         except TranslationStoppedError:
             raise
         except RuntimeError as e:
+            if "openrouter.ai" in self.base_url and self._is_non_retryable_openrouter_quota_error(str(e)):
+                # Surface actionable provider guidance directly to the UI.
+                raise
             # If batch request still gets throttled, fall back to smaller
             # one-by-one requests so we can make progress instead of
             # returning originals.
@@ -301,8 +320,15 @@ class Translator:
         # tokens, causing a 400 if max_tokens is set below the thinking budget.
         # Use a high ceiling so thinking + response tokens always fit.
         is_gemini_25 = "gemini-2.5" in self.model
+        is_openrouter = "openrouter.ai" in self.base_url
+        is_openrouter_free_model = is_openrouter and self.model.strip().endswith(":free")
         if is_gemini_25:
             max_tokens = 24576
+        elif is_openrouter_free_model:
+            # Free OpenRouter models are often tightly rate-limited.
+            max_tokens = 512
+        elif is_openrouter:
+            max_tokens = 1536
         elif "groq" in self.base_url:
             # Keep completion budget lower on free Groq tier to reduce TPM spikes.
             max_tokens = 512
@@ -347,6 +373,30 @@ class Translator:
                         # Slightly slower steady flow is faster overall than
                         # repeated 429 backoff storms.
                         Translator._groq_next_allowed_at = time.time() + 2.5
+                elif is_openrouter:
+                    # Serialize OpenRouter calls and honor shared cooldown to
+                    # avoid synchronized bursts during review/resume operations.
+                    with Translator._openrouter_gate:
+                        now = time.time()
+                        wait = Translator._openrouter_next_allowed_at - now
+                        if wait > 0:
+                            self._interruptible_sleep(wait)
+
+                        self._check_stop()
+
+                        response = httpx.post(
+                            f"{self.base_url}/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {self.api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=body,
+                            timeout=120.0,
+                        )
+
+                        # Gentle pacing dramatically reduces free-tier 429 storms.
+                        floor_delay = 3.0 if is_openrouter_free_model else 1.2
+                        Translator._openrouter_next_allowed_at = time.time() + floor_delay
                 else:
                     self._check_stop()
                     response = httpx.post(
@@ -363,8 +413,31 @@ class Translator:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in {401, 403}:
                     raise LLMAuthenticationError(self._format_auth_error(e)) from e
+                if e.response.status_code in {402, 429} and is_openrouter:
+                    # OpenRouter may return 429 for free-tier ineligible models
+                    # or exhausted free quota. These are usually not transient.
+                    detail = self._extract_error_detail(e.response)
+                    if self._is_non_retryable_openrouter_quota_error(detail):
+                        raise RuntimeError(
+                            "OpenRouter rejected this request due to quota/model eligibility. "
+                            "Choose an explicit :free model (for example, "
+                            "google/gemma-3-4b-it:free) or add credits. "
+                            f"Provider detail: {detail}"
+                        ) from e
                 if e.response.status_code == 429 and attempt < max_retries - 1:
                     wait = self._extract_retry_delay_seconds(e.response)
+                    detail = self._extract_error_detail(e.response)
+
+                    if is_openrouter and is_openrouter_free_model and wait >= 20:
+                        # Long Retry-After on OpenRouter free models is usually
+                        # a hard account/model limit, not a transient burst.
+                        raise RuntimeError(
+                            "OpenRouter free-tier request was rate-limited with a long retry window. "
+                            "This is usually an account/model limit, so automatic retries were stopped. "
+                            "Try another :free model or wait for the provider limit window. "
+                            f"Provider detail: {detail}"
+                        ) from e
+
                     if is_groq:
                         # Share the cooldown across all workers so subsequent
                         # requests don't immediately repeat the same 429.
@@ -373,9 +446,16 @@ class Translator:
                                 Translator._groq_next_allowed_at,
                                 time.time() + wait + 0.5,
                             )
+                    if is_openrouter:
+                        with Translator._openrouter_gate:
+                            Translator._openrouter_next_allowed_at = max(
+                                Translator._openrouter_next_allowed_at,
+                                time.time() + wait + 0.5,
+                            )
+                    short_detail = detail.replace("\n", " ")[:220]
                     print(
                         f"[Rate limit hit ({self.base_url}), retrying in {wait:.2f}s "
-                        f"({attempt + 1}/{max_retries})]"
+                        f"({attempt + 1}/{max_retries}); detail={short_detail}]"
                     )
                     self._interruptible_sleep(wait)
                     continue
@@ -413,6 +493,60 @@ class Translator:
             return max(1.0, float(match.group(1)) + 0.25)
 
         return 2.0
+
+    def _extract_error_detail(self, response: httpx.Response) -> str:
+        """Extract provider error detail from JSON/text payload."""
+        detail = ""
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            error_data = payload.get("error")
+            if isinstance(error_data, dict):
+                detail = str(error_data.get("message") or "").strip()
+                if not detail:
+                    try:
+                        detail = json.dumps(error_data, ensure_ascii=False)
+                    except Exception:
+                        detail = str(error_data).strip()
+            elif error_data:
+                detail = str(error_data).strip()
+            elif payload.get("message"):
+                detail = str(payload["message"]).strip()
+            elif payload:
+                try:
+                    detail = json.dumps(payload, ensure_ascii=False)
+                except Exception:
+                    detail = str(payload).strip()
+
+        if not detail:
+            detail = (response.text or "").strip()
+
+        return detail or "(no provider detail)"
+
+    def _is_non_retryable_openrouter_quota_error(self, detail: str) -> bool:
+        """Heuristic for OpenRouter free-tier/model errors that retries won't fix."""
+        text = detail.lower()
+        markers = (
+            "insufficient",
+            "credits",
+            "billing",
+            "payment",
+            "no endpoints found",
+            "model is not available",
+            "free-tier",
+            "free tier",
+            "not enough",
+            "quota exceeded",
+            "rate limit for this model",
+            "requests per day",
+            "rpd",
+            "daily limit",
+            "free-models-per-day",
+        )
+        return any(marker in text for marker in markers)
 
     def _format_auth_error(self, error: httpx.HTTPStatusError) -> str:
         """Build a concise UI-safe error message for auth failures."""
