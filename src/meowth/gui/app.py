@@ -349,6 +349,35 @@ class MeowthGUI(ctk.CTk):
             # Never let diagnostics break the GUI flow.
             pass
 
+    def _is_quota_or_rate_limit_error(self, error: Exception | str) -> bool:
+        """Heuristic classifier for provider quota/rate-limit failures."""
+        text = str(error).lower()
+        markers = (
+            "429",
+            "rate limit",
+            "quota",
+            "free-tier",
+            "free tier",
+            "daily limit",
+            "requests per day",
+            "free-models-per-day",
+            "retry window",
+            "insufficient",
+            "credits",
+            "billing",
+            "no endpoints found",
+            "model eligibility",
+        )
+        return any(marker in text for marker in markers)
+
+    def _quota_warning_message(self, error: Exception | str) -> str:
+        """User-facing warning for safely stopped runs due to provider limits."""
+        return (
+            "Provider quota/rate limit reached. The job stopped safely.\n"
+            "All already completed batches were saved to texts_translated.json.\n\n"
+            f"Provider detail: {error}"
+        )
+
     def _build_ui(self):
         """Build the user interface."""
         # --- Main split layout ---
@@ -555,6 +584,25 @@ class MeowthGUI(ctk.CTk):
         callbacks = GUICallbacks(self, self.progress_view, self.log_view)
         self.engine = TranslationEngine(config, callbacks)
 
+    def _get_review_text_limit(self) -> int | None:
+        """Return effective text limit for review actions, if configured."""
+        if not self.engine:
+            return None
+
+        getter = getattr(self.engine, "_get_effective_text_limit", None)
+        if not callable(getter):
+            return None
+
+        try:
+            limit = getter()
+        except Exception as exc:
+            self._debug(f"Failed to resolve review text limit: {exc}")
+            return None
+
+        if isinstance(limit, int) and limit > 0:
+            return limit
+        return None
+
     def _start_review_job(self, job_type: str, translated_path: Path, payload: Any) -> None:
         """Run review translation actions off the Tk main thread."""
         if self.is_running:
@@ -565,7 +613,11 @@ class MeowthGUI(ctk.CTk):
         self.review_panel.set_run_state(True)
         self.review_panel.set_activity(f"{job_type} preparing...", is_busy=True)
         self.log_view.append("info", f"Starting {job_type} in background...")
-        self._debug(f"Review job start: type={job_type}")
+        payload_size = len(payload) if isinstance(payload, (list, tuple, dict)) else 1
+        self._debug(
+            "Review job start: "
+            f"type={job_type}, translated_path={translated_path}, payload_size={payload_size}"
+        )
 
         thread = threading.Thread(
             target=self._run_review_job,
@@ -582,12 +634,17 @@ class MeowthGUI(ctk.CTk):
                 self.call_on_main_thread(self.review_panel.set_active_keys, active_keys)
 
         try:
+            self._debug(f"Review worker entered: type={job_type}")
             if job_type == "llm_selected":
                 selected_keys = payload if isinstance(payload, list) else []
+                self._debug(f"LLM selected payload keys={len(selected_keys)}")
                 retried, improved = self._retry_selected_entries(
                     translated_path,
                     selected_keys,
                     progress_callback=_report_activity,
+                )
+                self._debug(
+                    f"LLM selected result: retried={retried}, improved={improved}, path={translated_path}"
                 )
                 self.call_on_main_thread(
                     self.log_view.append,
@@ -596,10 +653,14 @@ class MeowthGUI(ctk.CTk):
                 )
             elif job_type == "resume_from_row":
                 start_key = str(payload)
+                self._debug(f"Resume-from-row payload: start_key={start_key}")
                 processed = self._resume_translation_from_key(
                     translated_path,
                     start_key,
                     progress_callback=_report_activity,
+                )
+                self._debug(
+                    f"Resume-from-row result: processed={processed}, start_key={start_key}, path={translated_path}"
                 )
                 self.call_on_main_thread(
                     self.log_view.append,
@@ -615,6 +676,16 @@ class MeowthGUI(ctk.CTk):
         except TranslationStoppedError:
             self.call_on_main_thread(self.log_view.append, "warning", "Review job stopped by user.")
         except Exception as exc:
+            if self._is_quota_or_rate_limit_error(exc):
+                warning = self._quota_warning_message(exc)
+                self._debug(f"Review job stopped by provider limits: {exc}")
+                self.call_on_main_thread(self.log_view.append, "warning", warning)
+                self.call_on_main_thread(
+                    messagebox.showwarning,
+                    "Provider Limit Reached",
+                    warning,
+                )
+                return
             self._debug(f"Review job failed: {exc}")
             self._debug(traceback.format_exc())
             self.call_on_main_thread(self.log_view.append, "error", f"Review job failed: {exc}")
@@ -634,9 +705,11 @@ class MeowthGUI(ctk.CTk):
 
     def _apply_manual_translation(self, translated_path: Path, key: str, translated: str) -> bool:
         data = json.loads(translated_path.read_text(encoding="utf-8"))
+        data = convert_format(data)
         indexed = self._index_translation_entries(data)
         item = indexed.get(key)
         if not item:
+            self._debug(f"Manual save skipped: key not found ({key})")
             return False
         item["entry"]["translated"] = translated
         translated_path.write_text(
@@ -652,27 +725,56 @@ class MeowthGUI(ctk.CTk):
         progress_callback: Callable[[str, list[str] | None], None] | None = None,
     ) -> int:
         data = json.loads(translated_path.read_text(encoding="utf-8"))
+        data = convert_format(data)
         indexed = self._index_translation_entries(data)
         ordered_keys = list(indexed.keys())
         if start_key not in indexed:
+            self._debug(f"Resume skipped: start key missing ({start_key})")
             return 0
 
         start_idx = ordered_keys.index(start_key)
         remaining_keys = ordered_keys[start_idx:]
+        limit = self._get_review_text_limit()
 
         table_items: list[tuple[str, dict]] = []
         free_items: list[tuple[str, dict]] = []
         for key in remaining_keys:
             item = indexed[key]
             entry = item["entry"]
-            if str(entry.get("translated", "")).strip():
+            # Resume should retry entries that still look untranslated/suspect,
+            # not only strictly empty ones.
+            if not self._is_suspect_entry(entry):
                 continue
             if item["source"] == "table":
                 table_items.append((key, entry))
             else:
                 free_items.append((key, entry))
 
+        if limit is not None:
+            allowed = max(0, limit)
+            if len(table_items) >= allowed:
+                table_items = table_items[:allowed]
+                free_items = []
+            else:
+                free_items = free_items[: max(0, allowed - len(table_items))]
+
+        self._debug(
+            "Resume candidates: "
+            f"start_key={start_key}, remaining={len(remaining_keys)}, "
+            f"table={len(table_items)}, free={len(free_items)}, limit={limit}"
+        )
+
         processed = 0
+
+        def _persist_progress(reason: str) -> None:
+            translated_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self._debug(
+                f"Resume progress saved ({reason}): path={translated_path}, processed={processed}"
+            )
+
         batch_size = max(1, int(getattr(self.engine.config, "batch_size", 30)))
         table_total_batches = (len(table_items) + batch_size - 1) // batch_size
         free_total_batches = (len(free_items) + batch_size - 1) // batch_size
@@ -685,8 +787,13 @@ class MeowthGUI(ctk.CTk):
                     f"Resume table {batch_idx}/{table_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
                     chunk_keys,
                 )
+            self._debug(
+                f"Resume table batch {batch_idx}/{table_total_batches}: "
+                f"size={len(chunk)}, first={chunk_keys[0]}, last={chunk_keys[-1]}"
+            )
             self.engine._translate_table_llm_batch([entry for _, entry in chunk])
             processed += len(chunk)
+            _persist_progress(f"table-batch-{batch_idx}")
 
         for batch_idx, i in enumerate(range(0, len(free_items), batch_size), start=1):
             chunk = free_items[i:i + batch_size]
@@ -696,13 +803,16 @@ class MeowthGUI(ctk.CTk):
                     f"Resume free {batch_idx}/{free_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
                     chunk_keys,
                 )
+            self._debug(
+                f"Resume free batch {batch_idx}/{free_total_batches}: "
+                f"size={len(chunk)}, first={chunk_keys[0]}, last={chunk_keys[-1]}"
+            )
             self.engine._translate_free_batch([entry for _, entry in chunk])
             processed += len(chunk)
+            _persist_progress(f"free-batch-{batch_idx}")
 
-        translated_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _persist_progress("final")
+        self._debug(f"Resume write complete: path={translated_path}, processed={processed}")
         return processed
 
     def _refresh_review_panel(self, silent: bool = True):
@@ -806,6 +916,7 @@ class MeowthGUI(ctk.CTk):
     ) -> tuple[int, int]:
         """Retry selected entries in-place using engine translation helpers."""
         data = json.loads(translated_path.read_text(encoding="utf-8"))
+        data = convert_format(data)
         indexed = self._index_translation_entries(data)
 
         table_items: list[tuple[str, dict]] = []
@@ -823,9 +934,23 @@ class MeowthGUI(ctk.CTk):
             else:
                 free_items.append((key, entry))
 
+        def _persist_progress(reason: str) -> None:
+            translated_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self._debug(
+                f"LLM selected progress saved ({reason}): path={translated_path}, retried={len(before_state)}"
+            )
+
         batch_size = max(1, int(getattr(self.engine.config, "batch_size", 30)))
         table_total_batches = (len(table_items) + batch_size - 1) // batch_size
         free_total_batches = (len(free_items) + batch_size - 1) // batch_size
+        self._debug(
+            "LLM selected candidates: "
+            f"selected={len(selected_keys)}, resolved={len(before_state)}, "
+            f"table={len(table_items)}, free={len(free_items)}"
+        )
 
         for batch_idx, i in enumerate(range(0, len(table_items), batch_size), start=1):
             chunk = table_items[i:i + batch_size]
@@ -835,7 +960,12 @@ class MeowthGUI(ctk.CTk):
                     f"LLM selected table {batch_idx}/{table_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
                     chunk_keys,
                 )
+            self._debug(
+                f"LLM selected table batch {batch_idx}/{table_total_batches}: "
+                f"size={len(chunk)}, first={chunk_keys[0]}, last={chunk_keys[-1]}"
+            )
             self.engine._translate_table_llm_batch([entry for _, entry in chunk])
+            _persist_progress(f"table-batch-{batch_idx}")
 
         for batch_idx, i in enumerate(range(0, len(free_items), batch_size), start=1):
             chunk = free_items[i:i + batch_size]
@@ -845,7 +975,12 @@ class MeowthGUI(ctk.CTk):
                     f"LLM selected free {batch_idx}/{free_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
                     chunk_keys,
                 )
+            self._debug(
+                f"LLM selected free batch {batch_idx}/{free_total_batches}: "
+                f"size={len(chunk)}, first={chunk_keys[0]}, last={chunk_keys[-1]}"
+            )
             self.engine._translate_free_batch([entry for _, entry in chunk])
+            _persist_progress(f"free-batch-{batch_idx}")
 
         improved = 0
         for key in before_state:
@@ -857,9 +992,9 @@ class MeowthGUI(ctk.CTk):
             if after_translated != before_state[key] and not self._is_suspect_entry(entry):
                 improved += 1
 
-        translated_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        _persist_progress("final")
+        self._debug(
+            f"LLM selected write complete: path={translated_path}, retried={len(before_state)}, improved={improved}"
         )
         return len(before_state), improved
 
@@ -876,6 +1011,13 @@ class MeowthGUI(ctk.CTk):
     def _on_translation_error(self, error: Exception):
         """Handle translation error."""
         self._debug(f"UI error callback invoked: {error}")
+        if self._is_quota_or_rate_limit_error(error):
+            warning = self._quota_warning_message(error)
+            self.log_view.append("warning", warning)
+            messagebox.showwarning("Provider Limit Reached", warning)
+            self._reset_buttons()
+            return
+
         self.log_view.append("error", f"Translation failed: {error}")
         messagebox.showerror("Translation Failed", str(error))
         self._reset_buttons()
