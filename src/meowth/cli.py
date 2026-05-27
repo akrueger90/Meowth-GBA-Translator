@@ -107,15 +107,20 @@ def main():
 @main.command()
 @click.argument("rom_path", type=click.Path(exists=True))
 @click.option("-o", "--output", default="work/texts.json", help="Output texts JSON path")
+@click.option("--metadata", default=None, type=click.Path(exists=True), help="HexManiac metadata .toml path")
 @click.option("--source", default="en", help="Source language code (default: from config or en)")
 @click.option("--target", default="zh-Hans", help="Target language code (default: from config or zh-Hans)")
-def extract(rom_path, output, source, target):
+def extract(rom_path, output, metadata, source, target):
     """Extract texts from ROM using MeowthBridge."""
     source = _get_language(source, "en", "source_language")
     target = _get_language(target, "zh-Hans", "target_language")
     validate_language(source)
     validate_language(target)
-    TranslationEngine.extract_texts(Path(rom_path), Path(output))
+    TranslationEngine.extract_texts(
+        Path(rom_path),
+        Path(output),
+        metadata_path=Path(metadata) if metadata else None,
+    )
     click.echo(f"Extracted: {output}")
 
 

@@ -341,10 +341,10 @@ class TranslationEngine:
                 if not policy.get("use_llm", True):
                     self._log(
                         "info",
-                        f"Table {category}: LLM disabled by category policy, keeping {len(needs_llm)} unresolved entries as originals.",
+                        f"Table {category}: LLM disabled by category policy, leaving {len(needs_llm)} unresolved entries empty.",
                     )
                     for entry in needs_llm:
-                        entry["translated"] = entry["original"].strip('"')
+                        entry["translated"] = ""
                 else:
                     self._log("info", f"Table {category}: running LLM fallback for {len(needs_llm)} entries")
                     self._translate_table_llm_batch(needs_llm)
@@ -505,8 +505,8 @@ class TranslationEngine:
                 # (the LLM batch filters out pure control codes / garbage automatically)
                 needs_llm.append(entry)
             else:
-                # Keep unresolved table terms unchanged when table LLM is disabled.
-                entry["translated"] = original
+                # Keep unresolved table terms empty so manual review can fill them.
+                entry["translated"] = ""
                 unchanged_count += 1
 
         # Batch translate all deferred LLM entries
@@ -726,7 +726,11 @@ class TranslationEngine:
         return find_meowth_bridge()
 
     @staticmethod
-    def extract_texts(rom_path: Path, output_path: Path) -> Path:
+    def extract_texts(
+        rom_path: Path,
+        output_path: Path,
+        metadata_path: Path | None = None,
+    ) -> Path:
         """Extract texts from ROM using MeowthBridge."""
         import os
         import shutil as _shutil
@@ -753,6 +757,14 @@ class TranslationEngine:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         rom_abs = rom_path.resolve()
 
+        metadata_abs: Path | None = metadata_path.resolve() if metadata_path else None
+        if metadata_abs is None:
+            candidates = [
+                rom_abs.with_suffix(".toml"),
+                Path(str(rom_abs) + ".toml"),
+            ]
+            metadata_abs = next((p for p in candidates if p.exists()), None)
+
         # Use output_path.parent (the work dir) as MeowthBridge's CWD.
         # This is always a writable directory (e.g. ~/Library/Caches/Meowth/work).
         cwd = output_path.parent
@@ -772,8 +784,12 @@ class TranslationEngine:
                 "resources/, HexManiacAdvance/src/HexManiac.Core/Models/Code, or bundled binaries Models/Code."
             )
 
+        extract_cmd = [str(exe), "extract", str(rom_abs)]
+        if metadata_abs is not None:
+            extract_cmd.extend(["--metadata", str(metadata_abs)])
+
         result = subprocess.run(
-            [str(exe), "extract", str(rom_abs)],
+            extract_cmd,
             capture_output=True, text=True,
             cwd=str(cwd),
         )

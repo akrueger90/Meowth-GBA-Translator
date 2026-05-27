@@ -75,9 +75,9 @@ class MeowthGUI(ctk.CTk):
             # start_translation can now have start_key and category_filter
             start_key = payload.get("start_key") if isinstance(payload, dict) else None
             category_filter = payload.get("category_filter") if isinstance(payload, dict) else None
-            
-            if start_key:
-                # Resume from selected row with optional category filter
+
+            if start_key or category_filter:
+                # Resume from selected row or process only filtered category.
                 run_dir = self._resolve_review_run()
                 if not run_dir:
                     self.log_view.append("warning", "No active/resumable run for review actions.")
@@ -88,8 +88,12 @@ class MeowthGUI(ctk.CTk):
                     return
                 self._active_run_dir = run_dir
                 self._ensure_engine_for_review()
-                # Pass category_filter to the resume function if present
-                self._start_review_job("resume_from_row", translated_path, (start_key, category_filter))
+                # Empty start_key means "start from beginning", constrained by category_filter.
+                self._start_review_job(
+                    "resume_from_row",
+                    translated_path,
+                    (str(start_key or ""), category_filter),
+                )
             else:
                 # Normal start translation
                 self._start_translation()
@@ -779,33 +783,38 @@ class MeowthGUI(ctk.CTk):
         self,
         translated_path: Path,
         start_key: str,
-            category_filter: str | None = None,
+        category_filter: str | None = None,
         progress_callback: Callable[[str, list[str] | None], None] | None = None,
     ) -> int:
         data = json.loads(translated_path.read_text(encoding="utf-8"))
         data = convert_format(data)
         indexed = self._index_translation_entries(data)
         ordered_keys = list(indexed.keys())
-        if start_key not in indexed:
+
+        if start_key and start_key not in indexed:
             self._debug(f"Resume skipped: start key missing ({start_key})")
             return 0
 
-        start_idx = ordered_keys.index(start_key)
+        start_idx = ordered_keys.index(start_key) if start_key else 0
         remaining_keys = ordered_keys[start_idx:]
         limit = self._get_review_text_limit()
 
-        table_items: list[tuple[str, dict]] = []
+        table_items: list[tuple[str, str, dict]] = []
         free_items: list[tuple[str, dict]] = []
         for key in remaining_keys:
             item = indexed[key]
             entry = item["entry"]
-                        # Skip entries that don't match category filter if one is active
+
+            # Skip entries that don't match category filter if one is active.
+            if category_filter and str(item.get("category", "")) != category_filter:
+                continue
+
             # Resume should retry entries that still look untranslated/suspect,
             # not only strictly empty ones.
             if not self._is_suspect_entry(entry):
                 continue
             if item["source"] == "table":
-                table_items.append((key, entry))
+                table_items.append((key, str(item.get("category", "")), entry))
             else:
                 free_items.append((key, entry))
 
@@ -819,7 +828,8 @@ class MeowthGUI(ctk.CTk):
 
         self._debug(
             "Resume candidates: "
-            f"start_key={start_key}, remaining={len(remaining_keys)}, "
+            f"start_key={start_key or '<begin>'}, category_filter={category_filter}, "
+            f"remaining={len(remaining_keys)}, "
             f"table={len(table_items)}, free={len(free_items)}, limit={limit}"
         )
 
@@ -840,7 +850,7 @@ class MeowthGUI(ctk.CTk):
 
         for batch_idx, i in enumerate(range(0, len(table_items), batch_size), start=1):
             chunk = table_items[i:i + batch_size]
-            chunk_keys = [key for key, _ in chunk]
+            chunk_keys = [key for key, _, _ in chunk]
             if progress_callback and chunk_keys:
                 progress_callback(
                     f"Resume table {batch_idx}/{table_total_batches}: {chunk_keys[0]} -> {chunk_keys[-1]}",
@@ -850,7 +860,22 @@ class MeowthGUI(ctk.CTk):
                 f"Resume table batch {batch_idx}/{table_total_batches}: "
                 f"size={len(chunk)}, first={chunk_keys[0]}, last={chunk_keys[-1]}"
             )
-            self.engine._translate_table_llm_batch([entry for _, entry in chunk])
+
+            # Process each table category with its configured policy.
+            # This avoids unintended LLM usage for glossary-only categories.
+            by_category: dict[str, list[dict]] = {}
+            for _, category, entry in chunk:
+                by_category.setdefault(category, []).append(entry)
+
+            for category, entries_for_category in by_category.items():
+                policy = self.engine.config.get_category_policy(category)
+                allow_table_llm = bool(self.engine.config.llm_for_tables and policy.get("use_llm", True))
+                table_stub = {"category": category, "entries": entries_for_category}
+                self.engine._translate_table(
+                    table_stub,
+                    run_llm=allow_table_llm,
+                    entries=entries_for_category,
+                )
             processed += len(chunk)
             _persist_progress(f"table-batch-{batch_idx}")
 
@@ -1121,6 +1146,18 @@ class MeowthGUI(ctk.CTk):
             source_rom = self._run_source_rom(run_dir)
             shutil.copy2(config.rom_path, source_rom)
             self.log_view.append("info", f"ROM copied: {source_rom.name}")
+
+            # Copy HexManiac metadata if present so extraction can use it.
+            original_rom = Path(config.rom_path)
+            metadata_candidates = [
+                original_rom.with_suffix(".toml"),
+                Path(str(original_rom) + ".toml"),
+            ]
+            source_metadata = next((p for p in metadata_candidates if p.exists()), None)
+            if source_metadata is not None:
+                copied_metadata = source_rom.with_suffix(".toml")
+                shutil.copy2(source_metadata, copied_metadata)
+                self.log_view.append("info", f"Metadata copied: {copied_metadata.name}")
             
             # Create necessary files
             texts_path = self._run_texts(run_dir)

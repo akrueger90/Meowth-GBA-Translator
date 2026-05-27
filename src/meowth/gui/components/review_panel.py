@@ -427,18 +427,12 @@ class ReviewPanel(ctk.CTkFrame):
         self.on_action("prepare", {})
 
     def _start_translation(self):
-        # Check if a row is selected - if so, start from that row instead
-        start_key = self._selected_key()
-        payload = {}
-        
-        if start_key:
-            # Start from selected row
-            payload["start_key"] = start_key
-        
-        # Pass category filter info if active
+        # With an active category filter, start only that subset.
+        # Do not pass start_key by default because table auto-selection would
+        # accidentally force row-based resume semantics.
+        payload: dict[str, str] = {}
         if self._current_category_filter is not None:
             payload["category_filter"] = self._current_category_filter
-        
         self.on_action("start_translation", payload)
 
     def _stop_translation(self):

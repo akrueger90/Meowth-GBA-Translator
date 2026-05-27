@@ -29,21 +29,45 @@ public static class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: MeowthBridge extract <rom.gba>");
+            Console.Error.WriteLine("Usage: MeowthBridge extract <rom.gba> [--metadata <file.toml>]");
             return 1;
         }
 
         var romPath = args[1];
+        string? metadataPath = null;
+        for (int i = 2; i < args.Length; i++)
+        {
+            if (args[i] == "--metadata" && i + 1 < args.Length)
+            {
+                metadataPath = args[++i];
+                continue;
+            }
+
+            Console.Error.WriteLine($"Unknown extract option: {args[i]}");
+            Console.Error.WriteLine("Usage: MeowthBridge extract <rom.gba> [--metadata <file.toml>]");
+            return 1;
+        }
+
         if (!File.Exists(romPath))
         {
             Console.Error.WriteLine($"ROM file not found: {romPath}");
             return 1;
         }
 
+        if (!string.IsNullOrWhiteSpace(metadataPath) && !File.Exists(metadataPath))
+        {
+            Console.Error.WriteLine($"Metadata file not found: {metadataPath}");
+            return 1;
+        }
+
         Directory.CreateDirectory("work");
 
         Console.Error.WriteLine($"Loading ROM: {romPath}");
-        var model = await RomLoader.Load(romPath);
+        if (!string.IsNullOrWhiteSpace(metadataPath))
+        {
+            Console.Error.WriteLine($"Using metadata: {metadataPath}");
+        }
+        var model = await RomLoader.Load(romPath, metadataPath);
         Console.Error.WriteLine($"ROM loaded. Game code: {RomLoader.GetGameCode(model)}");
 
         Console.Error.WriteLine("Extracting text...");
@@ -208,7 +232,7 @@ public static class Program
         Console.Error.WriteLine("Meowth GBA Translator - Three-stage pipeline");
         Console.Error.WriteLine("");
         Console.Error.WriteLine("Usage:");
-        Console.Error.WriteLine("  MeowthBridge extract <rom.gba>              → work/text.json");
+        Console.Error.WriteLine("  MeowthBridge extract <rom.gba> [--metadata <file.toml>] → work/text.json");
         Console.Error.WriteLine("  MeowthBridge translate [options]             → work/text_translated.json");
         Console.Error.WriteLine("  MeowthBridge apply <rom.gba>                → outputs/{game}_cn_{timestamp}.gba");
         Console.Error.WriteLine("");

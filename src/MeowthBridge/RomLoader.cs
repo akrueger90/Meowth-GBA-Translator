@@ -5,11 +5,16 @@ namespace MeowthBridge;
 
 public static class RomLoader
 {
-    public static async Task<HardcodeTablesModel> Load(string romPath)
+    public static async Task<HardcodeTablesModel> Load(string romPath, string? metadataPath = null)
     {
         var data = File.ReadAllBytes(romPath);
+        StoredMetadata? metadata = null;
+        if (!string.IsNullOrWhiteSpace(metadataPath) && File.Exists(metadataPath))
+        {
+            metadata = new StoredMetadata(File.ReadAllLines(metadataPath));
+        }
         var singletons = new Singletons();
-        var model = new HardcodeTablesModel(singletons, data);
+        var model = new HardcodeTablesModel(singletons, data, metadata!);
         await model.InitializationWorkload;
         return model;
     }

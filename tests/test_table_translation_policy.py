@@ -64,9 +64,18 @@ def test_translate_texts_keeps_unresolved_table_entries_without_llm(tmp_path: Pa
 
     engine.translate_texts(texts_path, output_path)
 
-    result = output_path.read_text(encoding="utf-8")
-    assert "Alabastia" in result
-    assert "UNKNOWN AREA" in result
+    import json
+
+    data = json.loads(output_path.read_text(encoding="utf-8"))
+    entries = [
+        entry
+        for table in data.get("tables", [])
+        for entry in table.get("entries", [])
+    ]
+    by_id = {entry["id"]: entry for entry in entries}
+
+    assert by_id["tbl_map_names_00001"]["translated"] == "Alabastia"
+    assert by_id["tbl_map_names_00002"].get("translated", "") == ""
 
 
 def test_translate_texts_uses_local_move_description_mapping_without_llm(tmp_path: Path):

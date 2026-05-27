@@ -344,6 +344,8 @@ class Glossary:
         if not candidate_map:
             return None
 
+        pokemon_only = categories == {"pokemon"}
+
         source_digits = "".join(ch for ch in source_compact if ch.isdigit())
         best_target: str | None = None
         best_score = 0.0
@@ -352,13 +354,21 @@ class Glossary:
             if not candidate_key:
                 continue
 
+            if pokemon_only:
+                # For Pokemon names, prefer misses over wrong substitutions.
+                if candidate_key[0] != source_compact[0]:
+                    continue
+                if abs(len(candidate_key) - len(source_compact)) > 2:
+                    continue
+
             candidate_digits = "".join(ch for ch in candidate_key if ch.isdigit())
             if source_digits and candidate_digits and source_digits != candidate_digits:
                 continue
 
             ratio = difflib.SequenceMatcher(None, source_compact, candidate_key).ratio()
             contains = source_compact in candidate_key or candidate_key in source_compact
-            score = ratio + (0.08 if contains else 0.0)
+            contains_bonus = 0.0 if pokemon_only else 0.08
+            score = ratio + (contains_bonus if contains else 0.0)
 
             if score > best_score:
                 best_score = score
@@ -368,7 +378,8 @@ class Glossary:
             return None
 
         # Conservative threshold: prefer misses over wrong term substitutions.
-        if best_score >= 0.78:
+        threshold = 0.92 if pokemon_only else 0.78
+        if best_score >= threshold:
             return best_target
         return None
 

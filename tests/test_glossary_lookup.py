@@ -29,6 +29,17 @@ def test_glossary_relaxed_lookup_respects_category_filter():
     assert glossary.lookup_relaxed("BITE", categories={"locations"}) is None
 
 
+def test_glossary_relaxed_lookup_is_strict_for_pokemon_names():
+    glossary = Glossary(source_lang="en", target_lang="de")
+
+    # Minor typo in the canonical Pokemon name should still match.
+    assert glossary.lookup_relaxed("Charmeleonn", categories={"pokemon"}) == "Glutexo"
+
+    # Similar but wrong names must not be substituted for Pokemon tables.
+    assert glossary.lookup_relaxed("Charmeleon", categories={"pokemon"}) == "Glutexo"
+    assert glossary.lookup_relaxed("Charmeleon", categories={"pokemon"}) != "Flamara"
+
+
 def test_glossary_description_lookup_supports_compact_variants():
     glossary = Glossary(source_lang="en", target_lang="de")
     glossary._index_description(
