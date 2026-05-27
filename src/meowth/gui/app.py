@@ -72,11 +72,39 @@ class MeowthGUI(ctk.CTk):
 
     def _panel_action(self, action: str, payload: dict[str, Any]):
         if action == "start_translation":
-            self._start_translation()
+            # start_translation can now have start_key and category_filter
+            start_key = payload.get("start_key") if isinstance(payload, dict) else None
+            category_filter = payload.get("category_filter") if isinstance(payload, dict) else None
+            
+            if start_key:
+                # Resume from selected row with optional category filter
+                run_dir = self._resolve_review_run()
+                if not run_dir:
+                    self.log_view.append("warning", "No active/resumable run for review actions.")
+                    return
+                translated_path = self._ensure_translated_file(run_dir)
+                if not translated_path.exists():
+                    self.log_view.append("warning", "No translated file available yet.")
+                    return
+                self._active_run_dir = run_dir
+                self._ensure_engine_for_review()
+                # Pass category_filter to the resume function if present
+                self._start_review_job("resume_from_row", translated_path, (start_key, category_filter))
+            else:
+                # Normal start translation
+                self._start_translation()
             return
 
         if action == "stop_translation":
             self._stop_translation()
+            return
+
+        if action == "prepare":
+            self._prepare_workspace()
+            return
+
+        if action == "category_settings":
+            self._show_category_settings()
             return
 
         run_dir = self._resolve_review_run()
@@ -115,6 +143,31 @@ class MeowthGUI(ctk.CTk):
             if isinstance(start_key, str) and start_key:
                 self._start_review_job("resume_from_row", translated_path, start_key)
             return
+
+    def _show_category_settings(self):
+        """Open category settings dialog."""
+        from .components import CategorySettingsDialog
+        
+        def on_settings_apply(policies: dict[str, dict[str, bool]]) -> None:
+            """Handle category settings apply."""
+            if not self.engine:
+                self.engine = TranslationEngine(
+                    config=self.config_form.get_config(),
+                    stop_event=self._stop_event,
+                )
+            
+            # Update config with new policies
+            self.engine.config.category_policies = policies
+            self.config_form.config.category_policies = policies
+            
+            self.log_view.append("info", "Category policies updated.")
+        
+        # Show dialog
+        dialog = CategorySettingsDialog(
+            self,
+            category_policies=self.config_form.get_config().category_policies,
+            on_apply=on_settings_apply,
+        )
 
     def _auto_refresh_review_panel(self):
         """Keep embedded review panel in sync while translation is active."""
@@ -654,9 +707,13 @@ class MeowthGUI(ctk.CTk):
             elif job_type == "resume_from_row":
                 start_key = str(payload)
                 self._debug(f"Resume-from-row payload: start_key={start_key}")
+                # payload can be a string (start_key only) or a tuple (start_key, category_filter)
+                start_key = str(payload[0]) if isinstance(payload, tuple) else str(payload)
+                category_filter = payload[1] if isinstance(payload, tuple) and len(payload) > 1 else None
+                self._debug(f"Resume-from-row: start_key={start_key}, category_filter={category_filter}")
                 processed = self._resume_translation_from_key(
-                    translated_path,
-                    start_key,
+                    translated_path, start_key,
+                    category_filter=category_filter,
                     progress_callback=_report_activity,
                 )
                 self._debug(
@@ -722,6 +779,7 @@ class MeowthGUI(ctk.CTk):
         self,
         translated_path: Path,
         start_key: str,
+            category_filter: str | None = None,
         progress_callback: Callable[[str, list[str] | None], None] | None = None,
     ) -> int:
         data = json.loads(translated_path.read_text(encoding="utf-8"))
@@ -741,6 +799,7 @@ class MeowthGUI(ctk.CTk):
         for key in remaining_keys:
             item = indexed[key]
             entry = item["entry"]
+                        # Skip entries that don't match category filter if one is active
             # Resume should retry entries that still look untranslated/suspect,
             # not only strictly empty ones.
             if not self._is_suspect_entry(entry):
@@ -1035,6 +1094,71 @@ class MeowthGUI(ctk.CTk):
             self._stop_event.set()
             self.engine.request_stop()
             self.review_panel.set_run_state(True)
+
+    def _prepare_workspace(self):
+        """Prepare workspace: copy ROM, create files, refresh PokeAPI cache, extract texts."""
+        self._debug("Prepare workspace clicked")
+        is_valid, error_message = self.config_form.validate()
+        if not is_valid:
+            self._debug(f"Validation failed: {error_message}")
+            self.log_view.append("error", error_message)
+            messagebox.showerror("Invalid Configuration", error_message)
+            return
+
+        config = self.config_form.get_config()
+        self.config_form.save_state()
+
+        try:
+            # Create new run directory
+            run_dir = self._create_new_run_dir(config.work_dir, config.rom_path)
+            self._active_run_dir = run_dir
+            
+            self.log_view.append("info", f"Preparing workspace in: {run_dir.name}")
+            self.progress_view.reset()
+            self.review_panel.set_activity("Preparing workspace...", is_busy=True)
+            
+            # Copy ROM to work folder
+            source_rom = self._run_source_rom(run_dir)
+            shutil.copy2(config.rom_path, source_rom)
+            self.log_view.append("info", f"ROM copied: {source_rom.name}")
+            
+            # Create necessary files
+            texts_path = self._run_texts(run_dir)
+            translated_path = self._run_translated(run_dir)
+            texts_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Initialize engine for preparation
+            self._debug("Initializing TranslationEngine for preparation")
+            self.engine = TranslationEngine(config, stop_event=self._stop_event)
+            self._debug("Engine initialized successfully")
+            
+            # Refresh PokeAPI cache
+            self.log_view.append("info", "Refreshing PokeAPI cache tables...")
+            try:
+                self.engine.glossary._update_pokeapi_cache()
+                self.log_view.append("info", "PokeAPI cache refreshed")
+            except Exception as e:
+                self.log_view.append("warning", f"PokeAPI cache update failed (non-critical): {e}")
+            
+            # Extract texts from ROM
+            self.log_view.append("info", "Extracting texts from ROM...")
+            self.engine.extract_texts(source_rom, texts_path)
+            self.log_view.append("info", f"Texts extracted: {len(list(texts_path.read_text().split(chr(10))))} entries")
+            
+            # Load extracted texts into review panel
+            self._refresh_review_panel(silent=False)
+            
+            self.log_view.append("info", f"✓ Workspace prepared. Ready to start translation.")
+            self.review_panel.set_activity("Workspace ready", is_busy=False)
+            
+            self._debug("Prepare workspace completed successfully")
+            
+        except Exception as e:
+            self._debug(f"Prepare workspace failed: {e}")
+            self._debug(traceback.format_exc())
+            self.log_view.append("error", f"Prepare failed: {e}")
+            messagebox.showerror("Preparation Failed", str(e))
+            self.review_panel.set_activity("Prepare failed", is_busy=False)
 
     def _reset_buttons(self):
         """Reset button states."""

@@ -32,6 +32,33 @@ def _get_default_output_dir() -> Path:
     return Path("outputs")
 
 
+def _get_default_category_policies() -> dict[str, dict[str, bool]]:
+    """Get default per-category translation policies.
+    
+    Returns:
+        Dict mapping category name to {use_glossary, use_llm} flags.
+        - use_glossary: Try glossary lookup first (PokeAPI data)
+        - use_llm: Use LLM fallback if glossary misses
+    """
+    return {
+        # Names: glossary-only (PokeAPI has authoritative translations)
+        "pokemon_names": {"use_glossary": True, "use_llm": False},
+        "move_names": {"use_glossary": True, "use_llm": False},
+        "ability_names": {"use_glossary": True, "use_llm": False},
+        "item_names": {"use_glossary": True, "use_llm": False},
+        "type_names": {"use_glossary": True, "use_llm": False},
+        "nature_names": {"use_glossary": True, "use_llm": False},
+        "trainer_classes": {"use_glossary": True, "use_llm": False},
+        "map_names": {"use_glossary": True, "use_llm": False},
+        # Descriptions: glossary-first, LLM fallback for better context
+        "ability_descriptions": {"use_glossary": True, "use_llm": True},
+        "move_descriptions": {"use_glossary": True, "use_llm": True},
+        "battle_text": {"use_glossary": True, "use_llm": True},
+        # Free text: LLM-primary for context-aware translation
+        "free_texts": {"use_glossary": True, "use_llm": True},
+    }
+
+
 @dataclass
 class TranslationConfig:
     """Configuration for the translation pipeline.
@@ -57,6 +84,7 @@ class TranslationConfig:
     llm_for_tables: bool = False
     test_limit_texts: int | None = None  # For testing: limit to N texts (None or 0 = all texts)
     use_env_test_limit: bool = True
+    category_policies: dict[str, dict[str, bool]] = field(default_factory=_get_default_category_policies)
 
     # File paths
     rom_path: Path | None = None
@@ -68,6 +96,30 @@ class TranslationConfig:
 
     # Optional context about the game to help the LLM translate better
     game_context: str = ""
+
+    def get_category_policy(self, category: str) -> dict[str, bool]:
+        """Get translation policy for a category.
+        
+        Args:
+            category: The category name (e.g., 'pokemon_names', 'free_texts')
+            
+        Returns:
+            Dict with {use_glossary, use_llm} flags, or defaults if category not found.
+        """
+        if category in self.category_policies:
+            return self.category_policies[category]
+        # Return defaults for unknown categories
+        return _get_default_category_policies().get(category, {"use_glossary": True, "use_llm": True})
+
+    def set_category_policy(self, category: str, use_glossary: bool, use_llm: bool) -> None:
+        """Set translation policy for a category.
+        
+        Args:
+            category: The category name
+            use_glossary: Whether to use glossary lookup
+            use_llm: Whether to use LLM fallback
+        """
+        self.category_policies[category] = {"use_glossary": use_glossary, "use_llm": use_llm}
 
     @classmethod
     def from_toml(cls, path: Path) -> "TranslationConfig":
@@ -85,6 +137,17 @@ class TranslationConfig:
         data = load_toml_file(path)
         translation = data.get("translation", {})
         api = translation.get("api", {})
+        category_policies_raw = translation.get("category_policies", {})
+        
+        # Merge loaded policies with defaults
+        category_policies = _get_default_category_policies()
+        if isinstance(category_policies_raw, dict):
+            for cat, policy in category_policies_raw.items():
+                if isinstance(policy, dict):
+                    category_policies[cat] = {
+                        "use_glossary": policy.get("use_glossary", True),
+                        "use_llm": policy.get("use_llm", True),
+                    }
 
         return cls(
             source_lang=translation.get("source_language", "en"),
@@ -96,6 +159,7 @@ class TranslationConfig:
             batch_size=translation.get("batch_size", 30),
             max_workers=translation.get("max_workers", 10),
             llm_for_tables=translation.get("llm_for_tables", False),
+            category_policies=category_policies,
         )
 
     @classmethod
@@ -137,6 +201,7 @@ class TranslationConfig:
             batch_size=self.batch_size if self.batch_size != 30 else toml_config.batch_size,
             max_workers=self.max_workers if self.max_workers != 10 else toml_config.max_workers,
             llm_for_tables=self.llm_for_tables,
+            category_policies=self.category_policies,
             rom_path=self.rom_path or toml_config.rom_path,
             output_dir=self.output_dir if self.output_dir != Path("outputs") else toml_config.output_dir,
             work_dir=self.work_dir if self.work_dir != Path("work") else toml_config.work_dir,

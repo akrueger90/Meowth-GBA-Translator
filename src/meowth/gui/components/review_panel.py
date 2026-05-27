@@ -16,6 +16,9 @@ class ReviewPanel(ctk.CTkFrame):
         self.candidates: list[dict[str, str]] = []
         self._row_id_to_index: dict[str, int] = {}
         self._active_keys: set[str] = set()
+        self._current_category_filter: str | None = None  # None means show all
+        self._category_buttons: dict[str, ctk.CTkButton] = {}
+        self._visible_row_ids: set[str] = set()  # Track currently visible rows
         self._build_ui()
 
     def _build_ui(self):
@@ -39,6 +42,14 @@ class ReviewPanel(ctk.CTkFrame):
             anchor="w",
         )
         self.activity_label.pack(fill="x", padx=12, pady=(0, 6))
+
+        # Category filter button bar
+        self.category_filter_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.category_filter_frame.pack(fill="both", expand=False, padx=12, pady=(0, 6))
+        
+        ctk.CTkLabel(self.category_filter_frame, text="Filter:", font=("", 10)).pack(side="left", padx=(0, 8))
+        self.category_buttons_frame = ctk.CTkFrame(self.category_filter_frame, fg_color="transparent")
+        self.category_buttons_frame.pack(side="left", fill="both", expand=True, anchor="nw")
 
         table_container = ctk.CTkFrame(self)
         table_container.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -92,9 +103,18 @@ class ReviewPanel(ctk.CTkFrame):
         controls.pack(fill="x", padx=12, pady=(0, 10))
 
         ctk.CTkButton(controls, text="Refresh", width=90, command=self._refresh).pack(side="left")
+        ctk.CTkButton(
+            controls,
+            text="Prepare",
+            width=90,
+            command=self._prepare,
+            fg_color="#65a30d",
+            hover_color="#54a80d",
+        ).pack(side="left", padx=(6, 0))
         ctk.CTkButton(controls, text="Select Suspects", width=120, command=self._select_suspects).pack(side="left", padx=(6, 0))
         ctk.CTkButton(controls, text="Next Untranslated", width=140, command=self._select_next_untranslated).pack(side="left", padx=(6, 0))
         ctk.CTkButton(controls, text="Clear", width=90, command=self._clear_selection).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(controls, text="Category Settings", width=140, command=self._show_category_settings, fg_color="#8b5cf6", hover_color="#7c3aed").pack(side="left", padx=(6, 0))
 
         self.start_button = ctk.CTkButton(
             controls,
@@ -127,20 +147,126 @@ class ReviewPanel(ctk.CTkFrame):
         ).pack(side="right")
         ctk.CTkButton(
             controls,
-            text="Resume Row",
-            width=110,
-            command=self._resume_from_row,
-            fg_color="#14b8a6",
-            hover_color="#0f766e",
-        ).pack(side="right", padx=(0, 6))
-        ctk.CTkButton(
-            controls,
             text="LLM Selected",
             width=110,
             command=self._llm_selected,
             fg_color="#0ea5e9",
             hover_color="#0284c7",
         ).pack(side="right", padx=(0, 6))
+
+    def _create_category_buttons(self, categories: set[str]) -> None:
+        """Create and display category filter buttons with wrapping."""
+        # Clear existing buttons
+        for widget in self.category_buttons_frame.winfo_children():
+            widget.destroy()
+        self._category_buttons.clear()
+
+        # Sort categories for consistent display, with "All" first
+        sorted_cats = sorted(categories)
+        
+        # Build button list: all category buttons (All is treated separately)
+        button_specs = [(None, "All")] + [(cat, cat.replace("_", " ").title()) for cat in sorted_cats]
+        
+        # Calculate buttons per row: assume ~90px per button (80w + 4px padding + 6px margin)
+        # Use grid to let buttons naturally wrap based on container width
+        buttons_per_row = 6  # Default, but will adapt based on available space
+        
+        current_row = 0
+        row_frame = None
+        buttons_in_row = 0
+        
+        for cat, display_name in button_specs:
+            # Create new row frame if needed
+            if buttons_in_row == 0:
+                row_frame = ctk.CTkFrame(self.category_buttons_frame, fg_color="transparent")
+                row_frame.pack(fill="x", pady=2)
+                current_row += 1
+            
+            # Create button
+            btn = ctk.CTkButton(
+                row_frame,
+                text=display_name,
+                width=80,
+                height=28,
+                font=("", 10),
+                command=lambda c=cat: self._on_category_filter_click(c),
+                fg_color="#1e40af" if self._current_category_filter == cat else "#4b5563",
+                hover_color="#1e3a8a",
+            )
+            btn.pack(side="left", padx=2, pady=1)
+            self._category_buttons[cat] = btn
+            
+            buttons_in_row += 1
+            if buttons_in_row >= buttons_per_row:
+                buttons_in_row = 0
+
+    def _on_category_filter_click(self, category: str | None) -> None:
+        """Handle category filter button click."""
+        self._current_category_filter = category
+        
+        # Update button colors
+        for cat, btn in self._category_buttons.items():
+            if cat == category:
+                btn.configure(fg_color="#1e40af")
+            else:
+                btn.configure(fg_color="#4b5563")
+        
+        # Re-filter the table
+        self._apply_category_filter()
+
+    def _apply_category_filter(self) -> None:
+        """Filter table rows based on current category filter."""
+        # Remove all rows
+        for row_id in self.tree.get_children():
+            self.tree.delete(row_id)
+        
+        self._visible_row_ids.clear()
+        
+        # Re-add matching rows
+        if self._current_category_filter is None:
+            # Show all rows
+            for idx, candidate in enumerate(self.candidates):
+                row_id = f"row_{idx}"
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=row_id,
+                    values=(
+                        candidate.get("key", ""),
+                        candidate.get("entry_id", ""),
+                        candidate.get("category", ""),
+                        candidate.get("original", ""),
+                        candidate.get("translated", ""),
+                    ),
+                )
+                self._visible_row_ids.add(row_id)
+        else:
+            # Show only matching rows
+            for idx, candidate in enumerate(self.candidates):
+                if candidate.get("category", "") == self._current_category_filter:
+                    row_id = f"row_{idx}"
+                    self.tree.insert(
+                        "",
+                        "end",
+                        iid=row_id,
+                        values=(
+                            candidate.get("key", ""),
+                            candidate.get("entry_id", ""),
+                            candidate.get("category", ""),
+                            candidate.get("original", ""),
+                            candidate.get("translated", ""),
+                        ),
+                    )
+                    self._visible_row_ids.add(row_id)
+        
+        # Re-apply tags to visible rows
+        self._apply_row_tags()
+        
+        # Select first row if available
+        if self.tree.get_children():
+            first_row = self.tree.get_children()[0]
+            self.tree.selection_set(first_row)
+            self._on_selection_changed()
 
     def set_run_state(self, is_running: bool) -> None:
         if is_running:
@@ -168,23 +294,12 @@ class ReviewPanel(ctk.CTkFrame):
         self._row_id_to_index.clear()
         self._active_keys = {k for k in self._active_keys if any(c.get("key") == k for c in candidates)}
 
-        for row_id in self.tree.get_children():
-            self.tree.delete(row_id)
+        # Extract unique categories and create filter buttons
+        categories = {c.get("category", "") for c in candidates if c.get("category", "")}
+        self._create_category_buttons(categories)
 
-        for idx, candidate in enumerate(candidates):
-            row_id = self.tree.insert(
-                "",
-                "end",
-                iid=f"row_{idx}",
-                values=(
-                    candidate.get("key", ""),
-                    candidate.get("entry_id", ""),
-                    candidate.get("category", ""),
-                    candidate.get("original", ""),
-                    candidate.get("translated", ""),
-                ),
-            )
-            self._row_id_to_index[row_id] = idx
+        # Apply filter (this will re-populate the table with filtered rows)
+        self._apply_category_filter()
 
         self._apply_row_tags()
 
@@ -306,8 +421,25 @@ class ReviewPanel(ctk.CTkFrame):
     def _refresh(self):
         self.on_action("refresh", {})
 
+
+    def _prepare(self):
+        """Prepare workspace: copy ROM, create files, refresh PokeAPI, extract texts."""
+        self.on_action("prepare", {})
+
     def _start_translation(self):
-        self.on_action("start_translation", {})
+        # Check if a row is selected - if so, start from that row instead
+        start_key = self._selected_key()
+        payload = {}
+        
+        if start_key:
+            # Start from selected row
+            payload["start_key"] = start_key
+        
+        # Pass category filter info if active
+        if self._current_category_filter is not None:
+            payload["category_filter"] = self._current_category_filter
+        
+        self.on_action("start_translation", payload)
 
     def _stop_translation(self):
         self.on_action("stop_translation", {})
@@ -355,12 +487,9 @@ class ReviewPanel(ctk.CTkFrame):
             return
         self.on_action("llm_selected", {"selected_keys": selected_keys})
 
-    def _resume_from_row(self):
-        start_key = self._selected_key()
-        if not start_key:
-            messagebox.showwarning("No Selection", "Select a row to resume from.")
-            return
-        self.on_action("resume_from_row", {"start_key": start_key})
+    def _show_category_settings(self):
+        """Open category settings dialog."""
+        self.on_action("category_settings", {})
 
     def _save_manual(self):
         key = self._selected_key()

@@ -335,8 +335,20 @@ class TranslationEngine:
             for table, needs_llm in pending_table_llm:
                 self._check_stop()
                 category = table.get("category", "unknown")
-                self._log("info", f"Table {category}: running LLM fallback for {len(needs_llm)} entries")
-                self._translate_table_llm_batch(needs_llm)
+                
+                # Check category policy for LLM usage
+                policy = self.config.get_category_policy(category)
+                if not policy.get("use_llm", True):
+                    self._log(
+                        "info",
+                        f"Table {category}: LLM disabled by category policy, keeping {len(needs_llm)} unresolved entries as originals.",
+                    )
+                    for entry in needs_llm:
+                        entry["translated"] = entry["original"].strip('"')
+                else:
+                    self._log("info", f"Table {category}: running LLM fallback for {len(needs_llm)} entries")
+                    self._translate_table_llm_batch(needs_llm)
+                
                 self._inject_dynamic_terms(table)
                 self._save_translation_snapshot(data, output_path)
         elif pending_table_llm:
@@ -355,6 +367,19 @@ class TranslationEngine:
                 f"{len(free_texts)} pending free-text entries"
             ),
         )
+
+        # Check category policy for free_texts
+        free_text_policy = self.config.get_category_policy("free_texts")
+        if not free_text_policy.get("use_llm", True):
+            # LLM disabled for free_texts - apply glossary only
+            self._log("info", "Free texts: LLM disabled by category policy, applying glossary only")
+            for entry in free_texts:
+                original = entry["original"].strip('"')
+                # Apply glossary replacements for entity names
+                glossary_applied = self.glossary.apply_to_text(original)
+                entry["translated"] = wrap_text(glossary_applied, target_lang=self.config.target_lang)
+            self._save_translation_snapshot(data, output_path)
+            return output_path
 
         batches = [
             free_texts[i : i + self.config.batch_size]
