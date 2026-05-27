@@ -137,6 +137,26 @@ class ReviewPanel(ctk.CTkFrame):
         )
         self.stop_button.pack(side="left", padx=(6, 0))
 
+        self.build_button = ctk.CTkButton(
+            controls,
+            text="Build Rom",
+            width=110,
+            command=self._build_rom,
+            fg_color="#0f766e",
+            hover_color="#0d9488",
+        )
+        self.build_button.pack(side="right")
+
+        self.finalize_button = ctk.CTkButton(
+            controls,
+            text="Finalize",
+            width=110,
+            command=self._finalize,
+            fg_color="#b91c1c",
+            hover_color="#991b1b",
+        )
+        self.finalize_button.pack(side="right", padx=(0, 6))
+
         ctk.CTkButton(
             controls,
             text="Save Manual",
@@ -144,7 +164,7 @@ class ReviewPanel(ctk.CTkFrame):
             command=self._save_manual,
             fg_color="#f59e0b",
             hover_color="#d97706",
-        ).pack(side="right")
+        ).pack(side="right", padx=(0, 6))
         ctk.CTkButton(
             controls,
             text="LLM Selected",
@@ -272,10 +292,14 @@ class ReviewPanel(ctk.CTkFrame):
         if is_running:
             self.start_button.configure(state="disabled", fg_color="#4b5563")
             self.stop_button.configure(state="normal", fg_color="#dc2626", hover_color="#b91c1c")
+            self.build_button.configure(state="disabled", fg_color="#4b5563")
+            self.finalize_button.configure(state="disabled", fg_color="#4b5563")
             return
 
         self.start_button.configure(state="normal", fg_color="#2563eb")
         self.stop_button.configure(state="disabled", fg_color="#4b5563", hover_color="#6b7280")
+        self.build_button.configure(state="normal", fg_color="#0f766e")
+        self.finalize_button.configure(state="normal", fg_color="#b91c1c")
 
     def set_activity(self, message: str, is_busy: bool = False) -> None:
         """Show current translation activity for review operations."""
@@ -437,6 +461,18 @@ class ReviewPanel(ctk.CTkFrame):
 
     def _stop_translation(self):
         self.on_action("stop_translation", {})
+
+    def _build_rom(self):
+        self.on_action("build_rom", {})
+
+    def _finalize(self):
+        confirmed = messagebox.askyesno(
+            "Finalize Run",
+            "Finalize will build the ROM, zip the current run folder, and remove the run from work. Continue?",
+        )
+        if not confirmed:
+            return
+        self.on_action("finalize", {})
 
     def _select_suspects(self):
         suspect_rows = [

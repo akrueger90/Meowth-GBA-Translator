@@ -17,7 +17,7 @@ from ..core import TranslationEngine
 from ..core.engine import convert_format
 from ..translator import TranslationStoppedError
 from .callbacks import GUICallbacks
-from .components import ConfigForm, LogView, ProgressView, ReviewPanel
+from .components import ConfigForm, LogView, ReviewPanel
 
 
 _APP_NAME = "Meowth Translator"
@@ -111,6 +111,14 @@ class MeowthGUI(ctk.CTk):
             self._show_category_settings()
             return
 
+        if action == "build_rom":
+            self._build_from_run_files(finalize=False)
+            return
+
+        if action == "finalize":
+            self._build_from_run_files(finalize=True)
+            return
+
         run_dir = self._resolve_review_run()
         if not run_dir:
             self.log_view.append("warning", "No active/resumable run for review actions.")
@@ -202,6 +210,25 @@ class MeowthGUI(ctk.CTk):
 
     def _run_config(self, run_dir: Path) -> Path:
         return run_dir / "run_config.json"
+
+    def _run_output_name_source(self, run_dir: Path, fallback_rom: Path) -> Path:
+        """Return path used to derive output ROM filename for this run."""
+        config_path = self._run_config(run_dir)
+        if not config_path.exists():
+            # Fallback for legacy/prepared runs without metadata:
+            # derive from run directory slug (name before "__timestamp").
+            slug = run_dir.name.split("__", 1)[0].strip()
+            if slug:
+                return Path(f"{slug}.gba")
+            return fallback_rom
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            original_rom = data.get("original_rom") if isinstance(data, dict) else None
+            if isinstance(original_rom, str) and original_rom.strip():
+                return Path(original_rom)
+        except Exception as exc:
+            self._debug(f"Failed to read run output naming source from {config_path}: {exc}")
+        return fallback_rom
 
     def _count_pending_entries(self, translated_path: Path) -> tuple[int, int]:
         if not translated_path.exists():
@@ -356,16 +383,113 @@ class MeowthGUI(ctk.CTk):
             encoding="utf-8",
         )
 
-    def _archive_run_dir(self, run_dir: Path, work_dir: Path) -> Path:
+    def _archive_run_dir_zip(self, run_dir: Path, work_dir: Path) -> Path:
         archive_root = self._archive_root(work_dir)
         archive_root.mkdir(parents=True, exist_ok=True)
 
-        destination = archive_root / run_dir.name
+        base_name = run_dir.name
+        archive_name = f"{base_name}.zip"
+        destination = archive_root / archive_name
         if destination.exists():
-            destination = archive_root / f"{run_dir.name}__{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            destination = archive_root / f"{base_name}__{stamp}.zip"
 
-        shutil.move(str(run_dir), str(destination))
+        shutil.make_archive(
+            str(destination.with_suffix("")),
+            "zip",
+            root_dir=run_dir.parent,
+            base_dir=run_dir.name,
+        )
+        shutil.rmtree(run_dir)
         return destination
+
+    def _build_from_run_files(self, finalize: bool) -> None:
+        """Build ROM from current run files, optionally finalizing (zip + cleanup)."""
+        if self.is_running:
+            self.log_view.append("warning", "Another operation is already running.")
+            return
+
+        is_valid, error_message = self.config_form.validate()
+        if not is_valid:
+            self.log_view.append("error", error_message)
+            messagebox.showerror("Invalid Configuration", error_message)
+            return
+
+        config = self.config_form.get_config()
+        self.config_form.save_state()
+
+        run_dir = self._resolve_review_run()
+        if not run_dir:
+            self.log_view.append("warning", "No active/resumable run available.")
+            return
+
+        translated_path = self._ensure_translated_file(run_dir)
+        if not translated_path.exists():
+            self.log_view.append("warning", "No translated file available yet.")
+            return
+
+        self._active_run_dir = run_dir
+        self._ensure_engine_for_review()
+
+        action_label = "Finalize" if finalize else "Build Rom"
+        self.is_running = True
+        self.review_panel.set_run_state(True)
+        self.review_panel.set_activity(f"{action_label} running...", is_busy=True)
+        self.log_view.append("info", f"Starting {action_label.lower()} from run files...")
+
+        thread = threading.Thread(
+            target=self._run_build_job,
+            args=(run_dir, translated_path, finalize, config),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_build_job(self, run_dir: Path, translated_path: Path, finalize: bool, config) -> None:
+        """Background build worker for Build Rom / Finalize actions."""
+        try:
+            if not self.engine:
+                raise RuntimeError("Translation engine not initialized")
+
+            source_rom = self._run_source_rom(run_dir)
+            if not source_rom.exists():
+                raise RuntimeError(f"Run is missing source ROM: {source_rom}")
+
+            _, _, _, _, _, output_path = self.engine._resolve_run_context(
+                rom_path=source_rom,
+                output_dir=config.output_dir,
+                work_dir=run_dir,
+                output_name_source=self._run_output_name_source(run_dir, source_rom),
+            )
+
+            self.engine.build_from_translations(
+                rom_path=source_rom,
+                translations_path=translated_path,
+                output_path=output_path,
+            )
+
+            if finalize:
+                archived_path = self._archive_run_dir_zip(run_dir, config.work_dir)
+                self.call_on_main_thread(
+                    self._on_translation_complete,
+                    output_path,
+                    archived_path,
+                    True,
+                    "Finalize completed.",
+                )
+            else:
+                self.call_on_main_thread(
+                    self._on_translation_complete,
+                    output_path,
+                    None,
+                    False,
+                    "Build completed.",
+                )
+        except TranslationStoppedError:
+            self.call_on_main_thread(self._on_translation_stopped)
+        except Exception as exc:
+            self._debug(f"Build/finalize failed: {exc}")
+            self._debug(traceback.format_exc())
+            self.call_on_main_thread(self._on_translation_error, exc)
 
     def call_on_main_thread(self, func, *args, **kwargs):
         """Schedule a callable to run on the Tk main thread."""
@@ -469,10 +593,6 @@ class MeowthGUI(ctk.CTk):
         self.config_form = ConfigForm(left)
         self.config_form.pack(fill="x", pady=(0, 8))
 
-        # Progress view
-        self.progress_view = ProgressView(left)
-        self.progress_view.pack(fill="x", pady=(0, 8))
-
         # Log view
         self.log_view = LogView(left)
         self.log_view.pack(fill="x")
@@ -516,7 +636,6 @@ class MeowthGUI(ctk.CTk):
             f"run={self._active_run_dir}, mode={choice}"
         )
 
-        self.progress_view.reset()
         self.log_view.append("info", "Starting translation...")
         self.log_view.append("info", f"Debug log: {self.debug_log_path}")
         self.review_panel.set_activity("Full translation running", is_busy=True)
@@ -524,7 +643,7 @@ class MeowthGUI(ctk.CTk):
         self.is_running = True
         self.review_panel.set_run_state(True)
 
-        callbacks = GUICallbacks(self, self.progress_view, self.log_view)
+        callbacks = GUICallbacks(self, self.log_view)
         self._stop_event = threading.Event()
 
         try:
@@ -588,28 +707,20 @@ class MeowthGUI(ctk.CTk):
                     f"Resuming run: {run_dir.name}",
                 )
 
-            _, _, _, _, _, output_path = self.engine._resolve_run_context(
-                rom_path=source_rom,
-                output_dir=config.output_dir,
-                work_dir=run_dir,
-            )
-
             self.engine.callbacks.on_stage_change("translate", "started")
             self.call_on_main_thread(self.log_view.append, "info", "Translating from run files...")
             self.engine.translate_texts(texts_path, translated_path)
             self.engine.callbacks.on_stage_change("translate", "completed")
 
             self.call_on_main_thread(self._refresh_review_panel, True)
-
-            self.engine.build_from_translations(
-                rom_path=source_rom,
-                translations_path=translated_path,
-                output_path=output_path,
+            self._debug(f"Translation completed for run={run_dir.name}; awaiting build/finalize action")
+            self.call_on_main_thread(
+                self._on_translation_complete,
+                None,
+                None,
+                False,
+                "Translation completed. Review entries, then use Build Rom or Finalize.",
             )
-
-            archived_path = self._archive_run_dir(run_dir, config.work_dir)
-            self._debug(f"Review/build flow completed successfully: output={output_path}")
-            self.call_on_main_thread(self._on_translation_complete, output_path, archived_path)
         except TranslationStoppedError:
             self._debug("Translation stopped by user")
             self.call_on_main_thread(self._on_translation_stopped)
@@ -638,7 +749,7 @@ class MeowthGUI(ctk.CTk):
     def _ensure_engine_for_review(self):
         # Always recreate from current form config so profile switches take effect.
         config = self.config_form.get_config()
-        callbacks = GUICallbacks(self, self.progress_view, self.log_view)
+        callbacks = GUICallbacks(self, self.log_view)
         self.engine = TranslationEngine(config, callbacks)
 
     def _get_review_text_limit(self) -> int | None:
@@ -1082,13 +1193,23 @@ class MeowthGUI(ctk.CTk):
         )
         return len(before_state), improved
 
-    def _on_translation_complete(self, output_path: Path, archived_run: Path | None = None):
+    def _on_translation_complete(
+        self,
+        output_path: Path | None,
+        archived_run: Path | None = None,
+        clear_active_run: bool = False,
+        message: str | None = None,
+    ):
         """Handle translation completion."""
         self._debug(f"UI completion callback invoked: output={output_path}")
-        self.log_view.append("info", f"Translation completed! Output: {output_path}")
+        if message:
+            self.log_view.append("info", message)
+        if output_path:
+            self.log_view.append("info", f"Output ROM: {output_path}")
         if archived_run:
             self.log_view.append("info", f"Archived run files: {archived_run}")
-        self._active_run_dir = None
+        if clear_active_run:
+            self._active_run_dir = None
         self._refresh_review_panel(silent=True)
         self._reset_buttons()
 
@@ -1139,7 +1260,6 @@ class MeowthGUI(ctk.CTk):
             self._active_run_dir = run_dir
             
             self.log_view.append("info", f"Preparing workspace in: {run_dir.name}")
-            self.progress_view.reset()
             self.review_panel.set_activity("Preparing workspace...", is_busy=True)
             
             # Copy ROM to work folder
@@ -1163,6 +1283,22 @@ class MeowthGUI(ctk.CTk):
             texts_path = self._run_texts(run_dir)
             translated_path = self._run_translated(run_dir)
             texts_path.parent.mkdir(parents=True, exist_ok=True)
+
+            run_meta = {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "original_rom": str(config.rom_path),
+                "source_rom": str(source_rom),
+                "texts": str(texts_path),
+                "translated": str(translated_path),
+                "source_lang": config.source_lang,
+                "target_lang": config.target_lang,
+                "provider": config.provider,
+                "model": config.model,
+            }
+            self._run_config(run_dir).write_text(
+                json.dumps(run_meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             
             # Initialize engine for preparation
             self._debug("Initializing TranslationEngine for preparation")

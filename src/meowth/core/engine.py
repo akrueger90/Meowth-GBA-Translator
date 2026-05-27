@@ -3,6 +3,7 @@
 import json
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -653,6 +654,7 @@ class TranslationEngine:
         output_path: Path,
     ) -> Path:
         """Build final translated ROM."""
+        build_started = time.perf_counter()
         # Auto-detect game
         detected = detect_game(original_rom)
         if detected != "unknown":
@@ -705,7 +707,9 @@ class TranslationEngine:
 
         # Inject texts
         self._log("info", Messages.INJECTING_TEXTS.format(count=len(all_entries)))
+        inject_started = time.perf_counter()
         rom, stats = writer.inject_texts(rom, all_entries)
+        inject_elapsed = time.perf_counter() - inject_started
         self._log("info", Messages.INJECTION_STATS.format(
             in_place=stats['in_place'],
             relocated=stats['relocated'],
@@ -713,10 +717,15 @@ class TranslationEngine:
             partial_ptr=stats.get('skipped_partial_ptrs', 0),
             unsafe_ptr=stats.get('unsafe_ptrs', 0)
         ))
+        self._log("info", f"Injection phase finished in {inject_elapsed:.1f}s")
 
         # Save
+        save_started = time.perf_counter()
         writer.save_rom(rom, output_path)
+        save_elapsed = time.perf_counter() - save_started
         self._log("info", Messages.SAVED_ROM.format(path=output_path))
+        self._log("info", f"ROM save finished in {save_elapsed:.1f}s")
+        self._log("info", f"Build total time: {(time.perf_counter() - build_started):.1f}s")
         return output_path
 
     @staticmethod
@@ -890,6 +899,7 @@ class TranslationEngine:
         rom_path: Path | None = None,
         output_dir: Path | None = None,
         work_dir: Path | None = None,
+        output_name_source: Path | str | None = None,
     ) -> tuple[Path, Path, Path, Path, Path, Path]:
         """Resolve and validate input/output paths for a translation run."""
         rom_path = rom_path or self.config.rom_path
@@ -922,8 +932,9 @@ class TranslationEngine:
                 _raw_code = _f.read(4).decode("ascii", errors="replace")
             raise RuntimeError(Messages.ROM_DECOMP_HACK.format(code=_raw_code))
 
-        original_name = rom_path.stem
-        lang_code = self.config.target_lang.split("-")[0]
+        name_source = Path(output_name_source).name if output_name_source is not None else rom_path.name
+        original_name = Path(name_source).stem
+        lang_code = str(self.config.target_lang).strip()
 
         texts_path = work_dir / "texts.json"
         translated_path = work_dir / "texts_translated.json"

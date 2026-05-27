@@ -9,7 +9,7 @@ class GUICallbacks(TranslationCallbacks):
     All UI updates are scheduled on the Tk main thread.
     """
 
-    def __init__(self, app, progress_view, log_view):
+    def __init__(self, app, log_view, progress_view=None):
         self.app = app
         self.progress_view = progress_view
         self.log_view = log_view
@@ -23,7 +23,8 @@ class GUICallbacks(TranslationCallbacks):
             self.app.after(0, func, *args)
 
     def on_progress(self, stage: str, current: int, total: int, message: str):
-        self._dispatch(self.progress_view.update, stage, current, total, message)
+        if self.progress_view is not None:
+            self._dispatch(self.progress_view.update, stage, current, total, message)
 
     def on_log(self, level: str, message: str):
         self._dispatch(self.log_view.append, level, message)
@@ -36,7 +37,8 @@ class GUICallbacks(TranslationCallbacks):
                 pass
 
     def on_stage_change(self, stage: str, status: str):
-        self._dispatch(self.progress_view.set_stage, stage, status)
+        if self.progress_view is not None:
+            self._dispatch(self.progress_view.set_stage, stage, status)
 
     def on_error(self, error: Exception):
         self._dispatch(self.log_view.append, "error", f"Error: {error}")

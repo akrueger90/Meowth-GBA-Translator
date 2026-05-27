@@ -42,6 +42,9 @@ class RomWriter:
         self.target_lang = target_lang
         self.FONT_BOUNDARY = self._FONT_BOUNDARIES.get(game, 0x01FD3000)
         self.write_offset = self.EXPANSION_START  # updated in inject()
+        # Built per inject_texts call to accelerate fallback pointer discovery.
+        self._search_blob: bytes | None = None
+        self._pointer_search_cache: dict[int, list[str]] = {}
 
     @staticmethod
     def _find_free_space(rom: bytes, boundary: int) -> int:
@@ -243,15 +246,28 @@ class RomWriter:
         Returns list of pointer source addresses in hex format (e.g., "0x00120674").
         Only searches in safe data section (>= MIN_POINTER_SOURCE).
         """
+        cached = self._pointer_search_cache.get(target_address)
+        if cached is not None:
+            return cached
+
         pointer_value = (self.POINTER_OFFSET + target_address).to_bytes(4, "little")
-        found = []
+        found: list[str] = []
 
-        # Search from MIN_POINTER_SOURCE to FONT_BOUNDARY
+        # Search from MIN_POINTER_SOURCE to FONT_BOUNDARY using C-accelerated bytes.find.
+        # This is significantly faster than Python-level per-word iteration.
         search_end = min(self.FONT_BOUNDARY, len(rom) - 4)
-        for addr in range(self.MIN_POINTER_SOURCE, search_end, 4):  # Align to 4 bytes
-            if rom[addr:addr+4] == pointer_value:
-                found.append(f"0x{addr:08X}")
+        blob = self._search_blob if self._search_blob is not None else bytes(rom)
 
+        pos = self.MIN_POINTER_SOURCE
+        while pos <= search_end:
+            idx = blob.find(pointer_value, pos, search_end + 4)
+            if idx == -1:
+                break
+            if idx % 4 == 0:
+                found.append(f"0x{idx:08X}")
+            pos = idx + 1
+
+        self._pointer_search_cache[target_address] = found
         return found
 
     def _write_relocated(
@@ -376,6 +392,9 @@ class RomWriter:
             print(f"Warning: only {available:,} bytes free before font boundary")
         self.write_offset = free_start
         print(f"Expansion region start: 0x{free_start:08X} ({available:,} bytes available)")
+        # Use an immutable snapshot for fast pointer searching during this build run.
+        self._search_blob = bytes(rom)
+        self._pointer_search_cache.clear()
 
         stats = {
             "in_place": 0, "relocated": 0, "skipped": 0,
@@ -390,6 +409,8 @@ class RomWriter:
             except Exception as e:
                 print(f"Error processing {entry.get('id', '?')}: {e}")
                 stats["errors"] += 1
+
+        self._search_blob = None
 
         return rom, stats
 
