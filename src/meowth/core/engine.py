@@ -34,7 +34,19 @@ _GAME_CODES: dict[str, str] = {
 TABLE_CATEGORIES = {
     "pokemon_names", "move_names", "ability_names", "nature_names",
     "type_names", "item_names", "trainer_classes", "map_names",
+    "ability_descriptions", "move_descriptions",
     "battle_text",  # Emerald battle messages with \\00/\\0F/\\34 runtime variables
+}
+
+# Table category -> glossary category mapping used for deterministic local lookup.
+_TABLE_TO_GLOSSARY_CATEGORIES: dict[str, set[str]] = {
+    "pokemon_names": {"pokemon"},
+    "move_names": {"moves"},
+    "ability_names": {"abilities"},
+    "nature_names": {"natures"},
+    "type_names": {"types"},
+    "item_names": {"items"},
+    "map_names": {"locations", "regions"},
 }
 
 # Hardcoded translations (FireRed + Chinese only)
@@ -132,7 +144,9 @@ def convert_format(data: dict) -> dict:
     free_texts: list = []
     for e in entries:
         cat = e.get("category", "")
-        if cat in TABLE_CATEGORIES:
+        entry_id = str(e.get("id", ""))
+        is_table_entry = cat in TABLE_CATEGORIES or entry_id.startswith("tbl_")
+        if is_table_entry:
             tables_by_cat.setdefault(cat, []).append(e)
         else:
             free_texts.append(e)
@@ -316,14 +330,21 @@ class TranslationEngine:
             # on LLM retries, so review pane and resume state stay up to date.
             self._save_translation_snapshot(data, output_path)
 
-        # Phase 2: LLM fallback only for unresolved table entries.
-        for table, needs_llm in pending_table_llm:
-            self._check_stop()
-            category = table.get("category", "unknown")
-            self._log("info", f"Table {category}: running LLM fallback for {len(needs_llm)} entries")
-            self._translate_table_llm_batch(needs_llm)
-            self._inject_dynamic_terms(table)
-            self._save_translation_snapshot(data, output_path)
+        # Phase 2: optional LLM fallback for unresolved table entries.
+        if self.config.llm_for_tables:
+            for table, needs_llm in pending_table_llm:
+                self._check_stop()
+                category = table.get("category", "unknown")
+                self._log("info", f"Table {category}: running LLM fallback for {len(needs_llm)} entries")
+                self._translate_table_llm_batch(needs_llm)
+                self._inject_dynamic_terms(table)
+                self._save_translation_snapshot(data, output_path)
+        elif pending_table_llm:
+            pending_count = sum(len(needs_llm) for _, needs_llm in pending_table_llm)
+            self._log(
+                "info",
+                f"Table LLM fallback disabled: kept {pending_count} unresolved table entries as originals.",
+            )
 
         # Translate free texts in parallel batches
         free_texts = [entry for entry in data["free_texts"] if not _has_meaningful_translation(entry)]
@@ -411,8 +432,10 @@ class TranslationEngine:
         target_entries = entries if entries is not None else table["entries"]
         needs_llm: list[dict] = []  # entries deferred to batch LLM call
         local_count = 0
+        unchanged_count = 0
         encode_fallback_count = 0
         glossary_miss_count = 0
+        glossary_categories = _TABLE_TO_GLOSSARY_CATEGORIES.get(category)
 
         for entry in target_entries:
             if _has_meaningful_translation(entry):
@@ -429,8 +452,14 @@ class TranslationEngine:
                 original in _TRAINER_CLASS_OVERRIDES):
                 entry["translated"] = _TRAINER_CLASS_OVERRIDES[original]
                 continue
-            # Try glossary lookup
-            zh = self.glossary.lookup(original)
+            # Try glossary lookup for categories with deterministic term tables.
+            zh = None
+            if category in ("ability_descriptions", "move_descriptions"):
+                zh = self.glossary.lookup_description(original, category)
+            elif glossary_categories:
+                zh = self.glossary.lookup(original)
+                if not zh:
+                    zh = self.glossary.lookup_relaxed(original, categories=glossary_categories)
             if zh:
                 # Sanitize glossary output for target language/PCS constraints
                 # before deciding to fall back to LLM.
@@ -446,9 +475,14 @@ class TranslationEngine:
 
             glossary_miss_count += 1
 
-            # No glossary match: always defer to LLM
-            # (the LLM batch filters out pure control codes / garbage automatically)
-            needs_llm.append(entry)
+            if run_llm:
+                # No glossary match: defer to table LLM fallback.
+                # (the LLM batch filters out pure control codes / garbage automatically)
+                needs_llm.append(entry)
+            else:
+                # Keep unresolved table terms unchanged when table LLM is disabled.
+                entry["translated"] = original
+                unchanged_count += 1
 
         # Batch translate all deferred LLM entries
         if run_llm and needs_llm:
@@ -457,7 +491,7 @@ class TranslationEngine:
                 (
                     f"Table {category}: local={local_count}, "
                     f"llm_pending={len(needs_llm)}, encode_fallback={encode_fallback_count}, "
-                    f"glossary_miss={glossary_miss_count}"
+                    f"glossary_miss={glossary_miss_count}, unchanged={unchanged_count}"
                 ),
             )
             self._translate_table_llm_batch(needs_llm)
@@ -469,7 +503,8 @@ class TranslationEngine:
                 f"llm={len(needs_llm) if run_llm else 0}, "
                 f"llm_pending={len(needs_llm) if not run_llm else 0}, "
                 f"encode_fallback={encode_fallback_count}, "
-                f"glossary_miss={glossary_miss_count}"
+                f"glossary_miss={glossary_miss_count}, "
+                f"unchanged={unchanged_count}"
             ),
         )
         self._inject_dynamic_terms(table)

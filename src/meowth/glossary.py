@@ -1,6 +1,7 @@
 """Load official Pokemon terminology from PokeAPI CSV files."""
 
 import csv
+import difflib
 import re
 import unicodedata
 from pathlib import Path
@@ -20,6 +21,11 @@ TERM_FILES = {
     "natures": ("nature_names.csv", "nature_id"),
     "locations": ("location_names.csv", "location_id"),
     "regions": ("region_names.csv", "region_id"),
+}
+
+PROSE_FILES = {
+    "ability_descriptions": ("ability_prose.csv", "ability_id", ("short_effect", "effect")),
+    "move_descriptions": ("move_effect_prose.csv", "move_effect_id", ("short_effect", "effect")),
 }
 
 # Categories that should be included in LLM context (proper nouns only)
@@ -130,6 +136,14 @@ def _normalize_lookup_key(text: str) -> str:
     return "".join(ch for ch in normalized if ch.isalnum() or ch in "♀♂")
 
 
+def _normalize_description_key(text: str) -> str:
+    """Normalize prose text for deterministic lookup across minor formatting changes."""
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = normalized.replace("\n", " ").replace("\r", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
+    return "".join(ch for ch in normalized if ch.isalnum() or ch in "♀♂%+-/ ")
+
+
 class Glossary:
     def __init__(
         self,
@@ -147,8 +161,15 @@ class Glossary:
         self._upper_index: dict[str, tuple[str, str, str]] = {}
         # Compact key index for punctuation/spacing variants and ROM macro forms.
         self._compact_index: dict[str, str] = {}
+        # Category-scoped compact index for safer relaxed table matching.
+        self._compact_by_category: dict[str, dict[str, str]] = {}
         # Category mapping: term → category
         self._term_category: dict[str, str] = {}
+        # Deterministic prose mappings for table descriptions.
+        self._ability_description_map: dict[str, str] = {}
+        self._move_description_map: dict[str, str] = {}
+        self._ability_description_compact: dict[str, str] = {}
+        self._move_description_compact: dict[str, str] = {}
 
         # Try loading from pre-built JSON first, fall back to CSV
         json_path = Path(__file__).parent.parent.parent / "resources" / f"glossary_{source_lang}_{target_lang}.json"
@@ -168,7 +189,9 @@ class Glossary:
         self.source_to_target[source.upper()] = target
         self._upper_index[source.upper()] = (source, target, category)
         self._term_category[source] = category
-        self._compact_index[_normalize_lookup_key(source)] = target
+        compact = _normalize_lookup_key(source)
+        self._compact_index[compact] = target
+        self._compact_by_category.setdefault(category, {})[compact] = target
 
     def _load_json(self, path: Path):
         """Load glossary from pre-built JSON file."""
@@ -182,7 +205,14 @@ class Glossary:
             category = term_categories.get(source, "unknown")
             self._upper_index[source.upper()] = (source, target, category)
             self._term_category[source] = category
-            self._compact_index[_normalize_lookup_key(source)] = target
+            compact = _normalize_lookup_key(source)
+            self._compact_index[compact] = target
+            self._compact_by_category.setdefault(category, {})[compact] = target
+
+        for source, target in data.get("ability_descriptions", {}).items():
+            self._index_description(source, target, "ability_descriptions")
+        for source, target in data.get("move_descriptions", {}).items():
+            self._index_description(source, target, "move_descriptions")
 
 
     def _load_all(self, base_dir: Path):
@@ -191,6 +221,29 @@ class Glossary:
             if not path.exists():
                 continue
             self._load_csv(path, id_col, category)
+
+        for category, (filename, id_col, text_columns) in PROSE_FILES.items():
+            path = base_dir / filename
+            if not path.exists():
+                continue
+            self._load_prose_csv(path, id_col, text_columns, category)
+
+    def _index_description(self, source: str, target: str, category: str) -> None:
+        source = source.strip()
+        target = target.strip()
+        if not source or not target:
+            return
+
+        key = _normalize_description_key(source)
+        if len(key) < 8:
+            return
+
+        if category == "ability_descriptions":
+            self._ability_description_map.setdefault(source, target)
+            self._ability_description_compact.setdefault(key, target)
+        elif category == "move_descriptions":
+            self._move_description_map.setdefault(source, target)
+            self._move_description_compact.setdefault(key, target)
 
     def _load_csv(self, path: Path, id_col: str, category: str):
         """Load a PokeAPI names CSV and build source->target mapping."""
@@ -213,6 +266,38 @@ class Glossary:
             if source_name and target_name:
                 self._index_term(source_name, target_name, category)
 
+    def _load_prose_csv(
+        self,
+        path: Path,
+        id_col: str,
+        text_columns: tuple[str, ...],
+        category: str,
+    ):
+        """Load PokeAPI prose CSV and index source->target description mappings."""
+        by_id: dict[int, dict[int, dict[str, str]]] = {}
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                entity_id = int(row[id_col])
+                lang_id = int(row["local_language_id"])
+                per_lang = by_id.setdefault(entity_id, {}).setdefault(lang_id, {})
+                for column in text_columns:
+                    text = (row.get(column) or "").strip()
+                    if text:
+                        per_lang[column] = text
+
+        for _, by_lang in by_id.items():
+            source_texts = by_lang.get(self.source_id, {})
+            target_texts = by_lang.get(self.target_id, {})
+            if not source_texts or not target_texts:
+                continue
+
+            for column in text_columns:
+                source_text = source_texts.get(column, "")
+                target_text = target_texts.get(column, "")
+                if source_text and target_text:
+                    self._index_description(source_text, target_text, category)
+
     def lookup(self, source_text: str) -> str | None:
         """Look up target translation for a source term.
 
@@ -233,6 +318,98 @@ class Glossary:
         
         # Try compact matching (no spaces/hyphens)
         return self._compact_index.get(_normalize_lookup_key(source_text))
+
+    def lookup_relaxed(self, source_text: str, categories: set[str] | None = None) -> str | None:
+        """Look up translation using strict matching, then conservative relaxed matching."""
+        if categories is None:
+            strict = self.lookup(source_text)
+            if strict:
+                return strict
+
+        source_compact = _normalize_lookup_key(source_text)
+        if len(source_compact) < 4:
+            return None
+
+        if categories:
+            candidate_map: dict[str, str] = {}
+            for category in categories:
+                candidate_map.update(self._compact_by_category.get(category, {}))
+        else:
+            candidate_map = self._compact_index
+
+        # Category-filtered strict compact match.
+        if source_compact in candidate_map:
+            return candidate_map[source_compact]
+
+        if not candidate_map:
+            return None
+
+        source_digits = "".join(ch for ch in source_compact if ch.isdigit())
+        best_target: str | None = None
+        best_score = 0.0
+
+        for candidate_key, target in candidate_map.items():
+            if not candidate_key:
+                continue
+
+            candidate_digits = "".join(ch for ch in candidate_key if ch.isdigit())
+            if source_digits and candidate_digits and source_digits != candidate_digits:
+                continue
+
+            ratio = difflib.SequenceMatcher(None, source_compact, candidate_key).ratio()
+            contains = source_compact in candidate_key or candidate_key in source_compact
+            score = ratio + (0.08 if contains else 0.0)
+
+            if score > best_score:
+                best_score = score
+                best_target = target
+
+        if best_target is None:
+            return None
+
+        # Conservative threshold: prefer misses over wrong term substitutions.
+        if best_score >= 0.78:
+            return best_target
+        return None
+
+    def lookup_description(self, source_text: str, category: str) -> str | None:
+        """Look up deterministic translation for table description categories."""
+        source = source_text.strip()
+        if not source:
+            return None
+
+        if category == "ability_descriptions":
+            exact_map = self._ability_description_map
+            compact_map = self._ability_description_compact
+        elif category == "move_descriptions":
+            exact_map = self._move_description_map
+            compact_map = self._move_description_compact
+        else:
+            return None
+
+        exact = exact_map.get(source)
+        if exact:
+            return exact
+
+        compact_key = _normalize_description_key(source)
+        if len(compact_key) < 8:
+            return None
+
+        direct = compact_map.get(compact_key)
+        if direct:
+            return direct
+
+        best_target: str | None = None
+        best_score = 0.0
+        for candidate_key, target in compact_map.items():
+            ratio = difflib.SequenceMatcher(None, compact_key, candidate_key).ratio()
+            if ratio > best_score:
+                best_score = ratio
+                best_target = target
+
+        if best_target and best_score >= 0.9:
+            return best_target
+        return None
 
     def matches_expected_translation(self, source_text: str, translated_text: str) -> bool:
         """Return True when translated_text matches the glossary result for source_text.

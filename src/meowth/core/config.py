@@ -54,6 +54,7 @@ class TranslationConfig:
     # Translation settings
     batch_size: int = 30
     max_workers: int = 10
+    llm_for_tables: bool = False
     test_limit_texts: int | None = None  # For testing: limit to N texts (None or 0 = all texts)
     use_env_test_limit: bool = True
 
@@ -94,6 +95,7 @@ class TranslationConfig:
             model=translation.get("model"),
             batch_size=translation.get("batch_size", 30),
             max_workers=translation.get("max_workers", 10),
+            llm_for_tables=translation.get("llm_for_tables", False),
         )
 
     @classmethod
@@ -134,6 +136,7 @@ class TranslationConfig:
             model=self.model or toml_config.model,
             batch_size=self.batch_size if self.batch_size != 30 else toml_config.batch_size,
             max_workers=self.max_workers if self.max_workers != 10 else toml_config.max_workers,
+            llm_for_tables=self.llm_for_tables,
             rom_path=self.rom_path or toml_config.rom_path,
             output_dir=self.output_dir if self.output_dir != Path("outputs") else toml_config.output_dir,
             work_dir=self.work_dir if self.work_dir != Path("work") else toml_config.work_dir,

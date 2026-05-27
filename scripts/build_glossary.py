@@ -29,6 +29,11 @@ TERM_FILES: dict[str, tuple[str, str]] = {
     "regions":   ("region_names.csv",          "region_id"),
 }
 
+PROSE_FILES: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "ability_descriptions": ("ability_prose.csv", "ability_id", ("short_effect", "effect")),
+    "move_descriptions": ("move_effect_prose.csv", "move_effect_id", ("short_effect", "effect")),
+}
+
 SUPPORTED_LANGUAGES: dict[str, dict] = {
     "en":      {"pokeapi_id": 9},
     "es":      {"pokeapi_id": 7},
@@ -67,6 +72,8 @@ def build_glossary(source_lang: str, target_lang: str) -> dict:
 
     source_to_target: dict[str, str] = {}
     term_categories: dict[str, str] = {}
+    ability_descriptions: dict[str, str] = {}
+    move_descriptions: dict[str, str] = {}
 
     for category, (filename, id_col) in TERM_FILES.items():
         print(f"  Processing {category} ({filename})…")
@@ -94,11 +101,56 @@ def build_glossary(source_lang: str, target_lang: str) -> dict:
                 added += 1
         print(f"    → {added} terms")
 
+    def collect_prose_mapping(
+        filename: str,
+        id_col: str,
+        text_columns: tuple[str, ...],
+        out_map: dict[str, str],
+    ) -> int:
+        content = download_csv(filename)
+        by_id: dict[int, dict[int, dict[str, str]]] = {}
+        reader = csv.DictReader(io.StringIO(content))
+        for row in reader:
+            entity_id = int(row[id_col])
+            lang_id = int(row["local_language_id"])
+            per_lang = by_id.setdefault(entity_id, {}).setdefault(lang_id, {})
+            for column in text_columns:
+                text = (row.get(column) or "").strip()
+                if text:
+                    per_lang[column] = text
+
+        added_local = 0
+        for _, by_lang in by_id.items():
+            src = by_lang.get(source_id, {})
+            tgt = by_lang.get(target_id, {})
+            if not src or not tgt:
+                continue
+
+            for column in text_columns:
+                source_text = src.get(column, "")
+                if not source_text:
+                    continue
+                target_text = tgt.get(column, "")
+                if not target_text:
+                    continue
+                if source_text not in out_map:
+                    out_map[source_text] = target_text
+                    added_local += 1
+        return added_local
+
+    for category, (filename, id_col, text_columns) in PROSE_FILES.items():
+        print(f"  Processing {category} ({filename})…")
+        out_map = ability_descriptions if category == "ability_descriptions" else move_descriptions
+        added = collect_prose_mapping(filename, id_col, text_columns, out_map)
+        print(f"    → {added} prose entries")
+
     return {
         "source_lang": source_lang,
         "target_lang": target_lang,
         "source_to_target": source_to_target,
         "term_categories": term_categories,
+        "ability_descriptions": ability_descriptions,
+        "move_descriptions": move_descriptions,
     }
 
 

@@ -5,6 +5,9 @@ provider = "deepseek"
 model = "deepseek-chat"
 source_language = "en"
 target_language = "zh-Hans"
+# Keep table categories deterministic (glossary/overrides only).
+# Set true to allow LLM fallback for unresolved table entries.
+llm_for_tables = false
 
 [translation.api]
 # Set the actual key in your shell or .env file.
