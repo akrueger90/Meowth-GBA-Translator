@@ -88,8 +88,9 @@ public class TextExtractor
 
             for (int i = 0; i < elementCount; i++)
             {
-                var (text, textAddress, textLength) = ExtractTableElementText(tableRun, i);
-                if (string.IsNullOrEmpty(text)) continue;
+                var (text, textAddress, textLength, isPointerBased, pointerSources) =
+                    ExtractTableElementText(tableRun, i);
+                if (string.IsNullOrEmpty(text) || IsPlaceholderText(text)) continue;
 
                 extractedAddresses.Add(textAddress);
 
@@ -99,8 +100,9 @@ public class TextExtractor
                     Category = category,
                     Address = $"0x{textAddress:X}",
                     Original = text,
-                    ByteLength = textLength,  // 使用实际文本长度
-                    IsPointerBased = false,
+                    ByteLength = textLength,
+                    IsPointerBased = isPointerBased,
+                    PointerSources = pointerSources,
                     TableName = tableName,
                     TableIndex = i
                 });
@@ -108,7 +110,21 @@ public class TextExtractor
         }
     }
 
-    private (string? text, int address, int length) ExtractTableElementText(ITableRun tableRun, int index)
+    private static bool IsPlaceholderText(string text)
+    {
+        var clean = text.Trim().Trim('"');
+        return clean.Length == 0 || clean.All(character =>
+            character == '?' || character == '-' || char.IsWhiteSpace(character)
+        );
+    }
+
+    private (
+        string? text,
+        int address,
+        int length,
+        bool isPointerBased,
+        List<string> pointerSources
+    ) ExtractTableElementText(ITableRun tableRun, int index)
     {
         var elementStart = tableRun.Start + index * tableRun.ElementLength;
         int segmentOffset = 0;
@@ -118,10 +134,11 @@ public class TextExtractor
             if (segment.Type == ElementContentType.PCS)
             {
                 var text = _model.TextConverter.Convert(_model, elementStart + segmentOffset, segment.Length);
-                return (text, elementStart + segmentOffset, segment.Length);
+                return (text, elementStart + segmentOffset, segment.Length, false, new());
             }
             if (segment.Type == ElementContentType.Pointer)
             {
+                var pointerSource = elementStart + segmentOffset;
                 var pointer = _model.ReadPointer(elementStart + segmentOffset);
                 if (pointer >= 0 && pointer < _model.Count)
                 {
@@ -129,13 +146,19 @@ public class TextExtractor
                     if (run is PCSRun pcsRun && run.Start == pointer)
                     {
                         var text = _model.TextConverter.Convert(_model, pcsRun.Start, pcsRun.Length);
-                        return (text, pcsRun.Start, pcsRun.Length);
+                        return (
+                            text,
+                            pcsRun.Start,
+                            pcsRun.Length,
+                            true,
+                            new() { $"0x{pointerSource:X}" }
+                        );
                     }
                 }
             }
             segmentOffset += segment.Length;
         }
-        return (null, 0, 0);
+        return (null, 0, 0, false, new());
     }
 
     /// <summary>
@@ -342,5 +365,3 @@ public class TextEntry
     [JsonPropertyName("translated")]
     public string? Translated { get; set; }
 }
-
-

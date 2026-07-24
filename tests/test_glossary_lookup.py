@@ -1,3 +1,5 @@
+import pytest
+
 from src.meowth.glossary import Glossary
 
 
@@ -52,3 +54,53 @@ def test_glossary_description_lookup_supports_compact_variants():
     assert glossary.lookup_description(source_variant, "move_descriptions") == (
         "Fugt regulären Schaden zu und hat eine 10%-Chance auf Verbrennung."
     )
+
+
+def test_glossary_loads_official_ability_and_move_flavor_text():
+    glossary = Glossary(source_lang="en", target_lang="de")
+
+    assert glossary.lookup_description(
+        "Summons rain in battle.", "ability_descriptions"
+    ) == "Ruft im Kampf Regen herbei."
+    assert glossary.lookup_description(
+        r"\qoSuper effective\qc hits.", "ability_descriptions"
+    ) == "Nur sehr effektive Treffer\nrichten Schaden an."
+    assert glossary.lookup_description(
+        "A physical attack delivered with a long tail or a foreleg, etc.",
+        "move_descriptions",
+    ) == "Ein Hieb mit den Vorderbeinen oder dem Schweif."
+    assert glossary.lookup_description(
+        "The foe is attacked with a sharp chop. It has a high critical-hit ratio.",
+        "move_descriptions",
+    ) == "Gute Möglichkeit, einen Volltreffer zu landen."
+
+
+def test_glossary_fails_clearly_when_official_data_is_missing(tmp_path):
+    with pytest.raises(FileNotFoundError, match="git submodule update --init pokeapi"):
+        Glossary(
+            pokeapi_dir=tmp_path / "missing",
+            source_lang="en",
+            target_lang="de",
+        )
+
+
+def test_apply_to_text_replaces_longest_terms_without_partial_words():
+    glossary = Glossary(source_lang="en", target_lang="de")
+    glossary.add_term("Dig", "Schaufler", "moves")
+    glossary.add_term("Diglett", "Digda", "pokemon")
+
+    translated = glossary.apply_to_text("Diglett can Dig near Indigobox.")
+
+    assert translated == "Digda can Schaufler near Indigobox."
+
+
+def test_placeholder_terms_cannot_corrupt_punctuation():
+    glossary = Glossary(source_lang="en", target_lang="de")
+    glossary.add_term("", "???", "dynamic")
+    glossary.add_term("???", "???", "dynamic")
+
+    text = "Wow, your POKéGEAR is impressive! Did your mom get it for you?"
+
+    assert glossary.lookup("") is None
+    assert glossary.lookup("???") is None
+    assert glossary.apply_to_text(text) == text

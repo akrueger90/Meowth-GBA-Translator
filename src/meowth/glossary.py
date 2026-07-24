@@ -28,6 +28,11 @@ PROSE_FILES = {
     "move_descriptions": ("move_effect_prose.csv", "move_effect_id", ("short_effect", "effect")),
 }
 
+FLAVOR_FILES = {
+    "ability_descriptions": ("ability_flavor_text.csv", "ability_id"),
+    "move_descriptions": ("move_flavor_text.csv", "move_id"),
+}
+
 # Categories that should be included in LLM context (proper nouns only)
 # These are terms that won't appear in everyday dialogue
 CONTEXT_SAFE_CATEGORIES = {
@@ -139,6 +144,8 @@ def _normalize_lookup_key(text: str) -> str:
 def _normalize_description_key(text: str) -> str:
     """Normalize prose text for deterministic lookup across minor formatting changes."""
     normalized = unicodedata.normalize("NFKC", text)
+    normalized = normalized.replace("\u00ad", "")
+    normalized = normalized.replace("\\qo", '"').replace("\\qc", '"')
     normalized = normalized.replace("\n", " ").replace("\r", " ")
     normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
     return "".join(ch for ch in normalized if ch.isalnum() or ch in "♀♂%+-/ ")
@@ -170,6 +177,7 @@ class Glossary:
         self._move_description_map: dict[str, str] = {}
         self._ability_description_compact: dict[str, str] = {}
         self._move_description_compact: dict[str, str] = {}
+        self._replacement_pattern: re.Pattern[str] | None = None
 
         # Try loading from pre-built JSON first, fall back to CSV
         json_path = Path(__file__).parent.parent.parent / "resources" / f"glossary_{source_lang}_{target_lang}.json"
@@ -178,18 +186,37 @@ class Glossary:
         else:
             self._load_all(pokeapi_dir)
 
+        if not self._compact_index:
+            raise FileNotFoundError(
+                "Official glossary data is unavailable. No pre-built glossary "
+                f"was found at {json_path}, and no PokeAPI terms were loaded "
+                f"from {pokeapi_dir}. In a source checkout, run:\n"
+                "  git submodule update --init pokeapi"
+            )
+
         # Apply manual overrides (highest priority, overwrite PokeAPI data)
         overrides = MANUAL_OVERRIDES.get(target_lang, {})
         for source, target in overrides.items():
             self._index_term(source, target, "manual")
 
+    @property
+    def term_count(self) -> int:
+        """Return the number of normalized official/manual glossary terms."""
+        return len(self._compact_index)
+
     def _index_term(self, source: str, target: str, category: str) -> None:
         """Index a glossary term for direct, case-insensitive, and compact lookup."""
+        source = source.strip()
+        target = target.strip()
+        compact = _normalize_lookup_key(source)
+        if not source or not target or not compact or not _normalize_lookup_key(target):
+            return
+
+        self._replacement_pattern = None
         self.source_to_target[source] = target
         self.source_to_target[source.upper()] = target
         self._upper_index[source.upper()] = (source, target, category)
         self._term_category[source] = category
-        compact = _normalize_lookup_key(source)
         self._compact_index[compact] = target
         self._compact_by_category.setdefault(category, {})[compact] = target
 
@@ -197,17 +224,11 @@ class Glossary:
         """Load glossary from pre-built JSON file."""
         import json
         data = json.loads(path.read_text(encoding="utf-8"))
-        self.source_to_target = data.get("source_to_target", {})
         term_categories = data.get("term_categories", {})
 
-        # Build uppercase index and compact index
-        for source, target in self.source_to_target.items():
+        for source, target in data.get("source_to_target", {}).items():
             category = term_categories.get(source, "unknown")
-            self._upper_index[source.upper()] = (source, target, category)
-            self._term_category[source] = category
-            compact = _normalize_lookup_key(source)
-            self._compact_index[compact] = target
-            self._compact_by_category.setdefault(category, {})[compact] = target
+            self._index_term(source, target, category)
 
         for source, target in data.get("ability_descriptions", {}).items():
             self._index_description(source, target, "ability_descriptions")
@@ -227,6 +248,12 @@ class Glossary:
             if not path.exists():
                 continue
             self._load_prose_csv(path, id_col, text_columns, category)
+
+        for category, (filename, id_col) in FLAVOR_FILES.items():
+            path = base_dir / filename
+            if not path.exists():
+                continue
+            self._load_flavor_csv(path, id_col, category)
 
     def _index_description(self, source: str, target: str, category: str) -> None:
         source = source.strip()
@@ -297,6 +324,31 @@ class Glossary:
                 target_text = target_texts.get(column, "")
                 if source_text and target_text:
                     self._index_description(source_text, target_text, category)
+
+    def _load_flavor_csv(self, path: Path, id_col: str, category: str) -> None:
+        """Map every source flavor variant to an official target-language variant."""
+        by_id: dict[int, dict[int, list[tuple[int, str]]]] = {}
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                entity_id = int(row[id_col])
+                lang_id = int(row["language_id"])
+                version_group_id = int(row["version_group_id"])
+                text = (row.get("flavor_text") or "").strip()
+                if text:
+                    by_id.setdefault(entity_id, {}).setdefault(lang_id, []).append(
+                        (version_group_id, text)
+                    )
+
+        for by_lang in by_id.values():
+            source_variants = by_lang.get(self.source_id, [])
+            target_variants = by_lang.get(self.target_id, [])
+            if not source_variants or not target_variants:
+                continue
+
+            _, target_text = min(target_variants, key=lambda variant: variant[0])
+            for _, source_text in source_variants:
+                self._index_description(source_text, target_text, category)
 
     def lookup(self, source_text: str) -> str | None:
         """Look up target translation for a source term.
@@ -444,16 +496,29 @@ class Glossary:
 
     def apply_to_text(self, text: str) -> str:
         """Apply glossary replacements to text using word-boundary matching."""
-        import re
+        if not text or not self.source_to_target:
+            return text
 
-        result = text
-        # Sort by length (longest first) to avoid partial replacements
-        for source, target in sorted(self.source_to_target.items(), key=lambda x: -len(x[0])):
-            # Use word boundaries to avoid matching substrings inside other words
-            # e.g. "Dig" should not match inside "Indigo"
-            pattern = re.compile(r"(?<![A-Za-z])" + re.escape(source) + r"(?![A-Za-z])")
-            result = pattern.sub(target, result)
-        return result
+        if self._replacement_pattern is None:
+            alternatives = sorted(
+                self.source_to_target,
+                key=lambda source: (-len(source), source),
+            )
+            self._replacement_pattern = re.compile(
+                r"(?<![A-Za-z])(?:"
+                + "|".join(re.escape(source) for source in alternatives)
+                + r")(?![A-Za-z])"
+            )
+
+        def replace(match: re.Match[str]) -> str:
+            source = match.group(0)
+            return (
+                self.source_to_target.get(source)
+                or self.source_to_target.get(source.upper())
+                or source
+            )
+
+        return self._replacement_pattern.sub(replace, text)
 
     def get_context_terms(self, text: str, limit: int = 20) -> dict[str, str]:
         """Find terms in text that have known translations (for LLM context).

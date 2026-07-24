@@ -51,7 +51,7 @@ def save_llm_profiles(profiles: dict[str, _LLMProfile], path: Path = LLM_PROFILE
         json.dump(profiles, f, ensure_ascii=True, indent=2, sort_keys=True)
 
 
-def load_form_state(path: Path = STATE_FILE_PATH) -> dict[str, str | bool]:
+def load_form_state(path: Path = STATE_FILE_PATH) -> dict[str, object]:
     """Load persisted GUI form state from disk."""
     if not path.exists():
         return {}
@@ -65,14 +65,16 @@ def load_form_state(path: Path = STATE_FILE_PATH) -> dict[str, str | bool]:
     if not isinstance(data, dict):
         return {}
 
-    state: dict[str, str | bool] = {}
+    state: dict[str, object] = {}
     for key, value in data.items():
         if isinstance(value, (str, bool)):
+            state[key] = value
+        elif key == "category_policies" and isinstance(value, dict):
             state[key] = value
     return state
 
 
-def save_form_state(state: dict[str, str | bool], path: Path = STATE_FILE_PATH) -> None:
+def save_form_state(state: dict[str, object], path: Path = STATE_FILE_PATH) -> None:
     """Persist GUI form state to disk."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as state_file:
@@ -85,6 +87,10 @@ class ConfigForm(ctk.CTkFrame):
     def __init__(self, master):
         """Initialize configuration form."""
         super().__init__(master, corner_radius=12, fg_color=("gray95", "gray14"))
+        self._category_policies = {
+            category: policy.copy()
+            for category, policy in TranslationConfig().category_policies.items()
+        }
 
         # Use a regular frame, not scrollable - the parent handles scrolling
         inner = ctk.CTkFrame(self, fg_color="transparent")
@@ -344,7 +350,7 @@ class ConfigForm(ctk.CTkFrame):
         entry.delete(0, "end")
         entry.insert(0, value)
 
-    def get_state(self) -> dict[str, str | bool]:
+    def get_state(self) -> dict[str, object]:
         """Return current form values in a serializable shape."""
         return {
             "rom_path": self.rom_entry.get().strip(),
@@ -360,9 +366,10 @@ class ConfigForm(ctk.CTkFrame):
             "test_limit_texts": self.test_limit_texts.get().strip(),
             "game_context": self.game_context_entry.get("1.0", "end-1c"),
             "advanced_visible": self.advanced_visible,
+            "category_policies": self.get_category_policies(),
         }
 
-    def apply_state(self, state: dict[str, str | bool]) -> None:
+    def apply_state(self, state: dict[str, object]) -> None:
         """Apply previously saved values to the form."""
         rom_path = state.get("rom_path")
         if isinstance(rom_path, str):
@@ -420,6 +427,10 @@ class ConfigForm(ctk.CTkFrame):
         if isinstance(advanced_visible, bool) and advanced_visible != self.advanced_visible:
             self._toggle_advanced()
 
+        category_policies = state.get("category_policies")
+        if isinstance(category_policies, dict):
+            self.set_category_policies(category_policies)
+
     def load_state(self, path: Path = STATE_FILE_PATH) -> None:
         """Load saved form values from disk, if present."""
         self.apply_state(load_form_state(path))
@@ -427,6 +438,36 @@ class ConfigForm(ctk.CTkFrame):
     def save_state(self, path: Path = STATE_FILE_PATH) -> None:
         """Write current form values to disk."""
         save_form_state(self.get_state(), path)
+
+    def set_category_policies(self, policies: dict[str, object]) -> None:
+        """Store a validated copy of category translation policies."""
+        normalized: dict[str, dict[str, bool]] = {}
+        for category, policy in policies.items():
+            if not isinstance(category, str) or not isinstance(policy, dict):
+                continue
+            use_glossary = policy.get("use_glossary")
+            use_llm = policy.get("use_llm")
+            if isinstance(use_glossary, bool) and isinstance(use_llm, bool):
+                normalized[category] = {
+                    "use_glossary": use_glossary,
+                    "use_llm": use_llm,
+                }
+        if normalized:
+            self._category_policies = normalized
+
+    def get_category_policies(self) -> dict[str, dict[str, bool]]:
+        """Return an independent copy of category translation policies."""
+        return {
+            category: policy.copy()
+            for category, policy in self._category_policies.items()
+        }
+
+    def requires_llm(self) -> bool:
+        """Return whether any configured category can call the LLM."""
+        return any(
+            policy.get("use_llm", True)
+            for policy in self._category_policies.values()
+        )
 
     def get_config(self) -> TranslationConfig:
         """Get current configuration."""
@@ -472,6 +513,7 @@ class ConfigForm(ctk.CTkFrame):
             rom_path=Path(self.rom_entry.get()) if self.rom_entry.get() else None,
             output_dir=output_dir,
             work_dir=work_dir,
+            category_policies=self.get_category_policies(),
         )
 
     def validate(self) -> tuple[bool, str]:
@@ -482,7 +524,7 @@ class ConfigForm(ctk.CTkFrame):
         if not rom_path.exists():
             return False, f"ROM file not found: {rom_path}"
 
-        if not self.api_key_entry.get().strip():
+        if self.requires_llm() and not self.api_key_entry.get().strip():
             provider = self.provider.get()
             preset = PROVIDER_PRESETS.get(provider)
             env_var = preset[2] if preset and len(preset) > 2 else None

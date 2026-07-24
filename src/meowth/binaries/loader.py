@@ -54,6 +54,16 @@ def get_platform_name() -> str:
         return "linux"
 
 
+def get_architecture_name() -> str:
+    """Get the release architecture name for the current process."""
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "x64"
+    if machine in ("arm64", "aarch64"):
+        return "arm64"
+    raise RuntimeError(f"Unsupported CPU architecture: {platform.machine()}")
+
+
 def get_executable_name() -> str:
     """Get the executable name for the current platform."""
     return "MeowthBridge.exe" if platform.system() == "Windows" else "MeowthBridge"
@@ -97,7 +107,7 @@ def _configure_dotnet_runtime_env():
 
 
 def _looks_like_arch_mismatch(path: Path) -> bool:
-    """Heuristic check for CPU architecture mismatch on macOS."""
+    """Check a native file for a CPU architecture mismatch on macOS."""
     if platform.system() != "Darwin" or not path.exists():
         return False
 
@@ -113,6 +123,28 @@ def _looks_like_arch_mismatch(path: Path) -> bool:
     if arch in ("x86_64", "amd64"):
         return "arm64" in lowered and "x86_64" not in lowered
     return False
+
+
+def _validate_binary_bundle(exe_path: Path) -> None:
+    """Validate the apphost and its native runtime libraries."""
+    if not exe_path.exists():
+        raise FileNotFoundError(f"MeowthBridge executable not found: {exe_path}")
+    if platform.system() != "Darwin":
+        return
+
+    native_files = [exe_path, *sorted(exe_path.parent.glob("*.dylib"))]
+    createdump = exe_path.parent / "createdump"
+    if createdump.exists():
+        native_files.append(createdump)
+
+    mismatches = [path for path in native_files if _looks_like_arch_mismatch(path)]
+    if mismatches:
+        listed = "\n".join(f"  - {path.name}" for path in mismatches[:10])
+        raise RuntimeError(
+            "MeowthBridge contains native files for the wrong CPU architecture.\n"
+            f"Required architecture: {get_architecture_name()}\n"
+            f"Incompatible files:\n{listed}"
+        )
 
 
 def find_meowth_bridge() -> Path:
@@ -133,10 +165,12 @@ def find_meowth_bridge() -> Path:
     if env_path:
         env_exe = Path(env_path)
         if env_exe.exists() and env_exe.is_file():
+            _validate_binary_bundle(env_exe)
             return env_exe
         if env_exe.is_dir():
             env_exe = env_exe / exe_name
             if env_exe.exists():
+                _validate_binary_bundle(env_exe)
                 return env_exe
 
     # Strategy 2: Check development build
@@ -147,25 +181,26 @@ def find_meowth_bridge() -> Path:
         dev_exe = meowth_bridge_dir / "bin" / build_config / "net8.0" / exe_name
         if dev_exe.exists():
             _ensure_unix_executable(dev_exe)
+            _validate_binary_bundle(dev_exe)
             return dev_exe
 
     # Strategy 3: Check bundled binary in package
     package_dir = Path(__file__).parent
     platform_name = get_platform_name()
-    bundled_exe = package_dir / platform_name / exe_name
+    platform_arch = f"{platform_name}-{get_architecture_name()}"
+    bundled_candidates = [
+        package_dir / platform_arch / exe_name,
+        package_dir / platform_name / exe_name,
+    ]
 
-    if bundled_exe.exists():
-        _ensure_unix_executable(bundled_exe)
-        if _looks_like_arch_mismatch(bundled_exe):
-            raise RuntimeError(
-                "Found bundled MeowthBridge binary, but architecture does not match this Mac.\n"
-                f"Host architecture: {platform.machine()}\n"
-                f"Binary: {bundled_exe}\n"
-                "Build a local bridge and use it instead:\n"
-                "  dotnet build src/MeowthBridge/MeowthBridge.csproj -c Debug\n"
-                "Or set MEOWTH_BRIDGE_PATH to a compatible binary."
-            )
-        return bundled_exe
+    for bundled_exe in bundled_candidates:
+        if bundled_exe.exists():
+            _ensure_unix_executable(bundled_exe)
+            try:
+                _validate_binary_bundle(bundled_exe)
+                return bundled_exe
+            except RuntimeError as error:
+                print(f"⚠️  Ignoring incompatible bundled bridge: {error}")
 
     # Strategy 4: Check old location (backward compatibility)
     old_location = project_root / "MeowthBridge" / "bin"
@@ -173,6 +208,7 @@ def find_meowth_bridge() -> Path:
         old_exe = old_location / build_config / "net8.0" / exe_name
         if old_exe.exists():
             _ensure_unix_executable(old_exe)
+            _validate_binary_bundle(old_exe)
             return old_exe
 
     # Strategy 5: Download from GitHub
@@ -182,7 +218,7 @@ def find_meowth_bridge() -> Path:
         raise FileNotFoundError(
             f"MeowthBridge executable not found. Tried:\n"
             f"  1. Environment variable MEOWTH_BRIDGE_PATH: {env_path or '(not set)'}\n"
-            f"  2. Bundled binary: {bundled_exe}\n"
+            f"  2. Bundled binaries: {', '.join(map(str, bundled_candidates))}\n"
             f"  3. Development build: {meowth_bridge_dir / 'bin'}\n"
             f"  4. Download from GitHub: {download_error}\n"
             f"\n"
@@ -196,13 +232,18 @@ def _download_meowth_bridge() -> Path:
     """Download MeowthBridge ZIP from GitHub release and extract it."""
     exe_name = get_executable_name()
     platform_name = get_platform_name()
+    architecture = get_architecture_name()
+    platform_arch = f"{platform_name}-{architecture}"
     version = get_meowth_version()
 
-    asset_name = f"MeowthBridge-{platform_name}.zip"
+    asset_name = f"MeowthBridge-{platform_arch}.zip"
     download_url = f"https://github.com/Olcmyk/Meowth-GBA-Translator/releases/download/v{version}/{asset_name}"
 
-    # Cache directory
-    cache_dir = Path.home() / ".meowth" / "binaries" / platform_name
+    # Versioned, architecture-specific caches prevent stale native libraries
+    # from being mixed with a newly downloaded apphost.
+    cache_dir = (
+        Path.home() / ".meowth" / "binaries" / platform_arch / f"v{version}"
+    )
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     exe_path = cache_dir / exe_name
@@ -210,7 +251,13 @@ def _download_meowth_bridge() -> Path:
     # If already cached, return it
     if exe_path.exists():
         _ensure_unix_executable(exe_path)
-        return exe_path
+        try:
+            _validate_binary_bundle(exe_path)
+            return exe_path
+        except RuntimeError as error:
+            print(f"⚠️  Replacing incompatible cached bridge: {error}")
+            shutil.rmtree(cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Download the ZIP file
     print(f"🔽 First-time setup: Downloading MeowthBridge for {platform_name}...")
@@ -223,16 +270,28 @@ def _download_meowth_bridge() -> Path:
 
         _download_with_progress_and_retry(download_url, tmp_zip_path)
 
-        # Extract ZIP to cache directory
+        # Extract into a temporary sibling, then replace the cache atomically.
         print(f"📦 Extracting files...")
-        with zipfile.ZipFile(tmp_zip_path, 'r') as zip_ref:
-            zip_ref.extractall(cache_dir)
+        extract_dir = Path(tempfile.mkdtemp(prefix="meowth-bridge-", dir=cache_dir.parent))
+        try:
+            with zipfile.ZipFile(tmp_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            extracted_exe = extract_dir / exe_name
+            _ensure_unix_executable(extracted_exe)
+            _validate_binary_bundle(extracted_exe)
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            extract_dir.replace(cache_dir)
+        except Exception:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            raise
 
         # Clean up temporary ZIP file
         tmp_zip_path.unlink()
 
         # Make executable on Unix
         _ensure_unix_executable(exe_path)
+        _validate_binary_bundle(exe_path)
 
         print(f"✅ Downloaded and cached to {cache_dir}")
         print(f"   (Subsequent runs will use the cached version)")

@@ -75,7 +75,11 @@ class Charmap:
 
     def can_encode(self, text: str) -> tuple[bool, list[str]]:
         """Check if all characters in text can be encoded. Returns (ok, bad_chars)."""
-        bad = [ch for ch in text if ch not in self.char_to_bytes]
+        bad = [
+            ch
+            for ch in text
+            if ch not in self.char_to_bytes and ch not in ("\n", "\r")
+        ]
         return len(bad) == 0, bad
 
     def supported_chars(self) -> set[str]:

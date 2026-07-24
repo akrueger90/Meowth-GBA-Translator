@@ -160,17 +160,16 @@ class RomWriter:
             # Write to expansion area and update pointers
             self._write_with_redirect(rom, encoded, pointer_sources, stats)
         elif address > 0 and original_length > 0:
-            # In-place: find actual text footprint (up to first 0xFF)
-            actual_text_len = original_length
-            for j in range(original_length):
-                if address + j < len(rom) and rom[address + j] == 0xFF:
-                    actual_text_len = j + 1  # include terminator
-                    break
-            if len(encoded) <= actual_text_len:
+            actual_text_len = self._find_original_text_length(
+                rom, address, original_length
+            )
+            capacity = (
+                original_length if entry.get("table_name") else actual_text_len
+            )
+            if len(encoded) <= capacity:
                 self._write_in_place(rom, address, encoded, original_length, stats)
             else:
-                # Truncate to fit the original text slot
-                truncated = self._truncate_encoded(encoded, actual_text_len)
+                truncated = self._truncate_encoded(encoded, capacity)
                 self._write_in_place(rom, address, truncated, original_length, stats)
         else:
             stats["skipped_same"] += 1
@@ -239,6 +238,16 @@ class RomWriter:
             )
 
         stats["written"] += 1
+
+    @staticmethod
+    def _find_original_text_length(
+        rom: bytearray, address: int, max_length: int
+    ) -> int:
+        """Return the original encoded length, including its terminator."""
+        for offset in range(max_length):
+            if address + offset < len(rom) and rom[address + offset] == 0xFF:
+                return offset + 1
+        return max_length
 
     def _search_pointers(self, rom: bytearray, target_address: int) -> list[str]:
         """Search ROM for pointers to the given address.
@@ -399,6 +408,8 @@ class RomWriter:
         stats = {
             "in_place": 0, "relocated": 0, "skipped": 0,
             "skipped_partial_ptrs": 0, "unsafe_ptrs": 0, "errors": 0,
+            "expanded_in_place": 0, "truncated": 0,
+            "size_diagnostics": [],
         }
 
         for entry in entries:
@@ -411,6 +422,7 @@ class RomWriter:
                 stats["errors"] += 1
 
         self._search_blob = None
+        self._print_size_diagnostics(stats)
 
         return rom, stats
 
@@ -450,14 +462,21 @@ class RomWriter:
             self._write_relocated(rom, encoded, pointer_sources)
             stats["relocated"] += 1
         elif address > 0 and original_length > 0:
-            actual_text_len = original_length
-            for j in range(original_length):
-                if address + j < len(rom) and rom[address + j] == 0xFF:
-                    actual_text_len = j + 1
-                    break
-            if len(encoded) <= actual_text_len:
+            actual_text_len = self._find_original_text_length(
+                rom, address, original_length
+            )
+            is_fixed_width_table = bool(entry.get("table_name"))
+            capacity = original_length if is_fixed_width_table else actual_text_len
+
+            if len(encoded) <= capacity:
                 self._write_in_place_v2(rom, address, encoded, original_length)
                 stats["in_place"] += 1
+                if len(encoded) > actual_text_len:
+                    stats["expanded_in_place"] += 1
+                    self._record_size_diagnostic(
+                        stats, entry, actual_text_len, capacity, len(encoded),
+                        "used full table slot",
+                    )
             else:
                 # Text is too long - search for pointers to enable relocation
                 found_pointers = self._search_pointers(rom, address)
@@ -467,8 +486,56 @@ class RomWriter:
                     stats["relocated"] += 1
                 else:
                     # No pointers found - truncate as last resort
-                    truncated = self._truncate_encoded(encoded, actual_text_len)
+                    truncated = self._truncate_encoded(encoded, capacity)
                     self._write_in_place_v2(rom, address, truncated, original_length)
                     stats["in_place"] += 1
+                    stats["truncated"] += 1
+                    self._record_size_diagnostic(
+                        stats, entry, actual_text_len, capacity, len(encoded),
+                        "truncated: no pointer found",
+                    )
         else:
             stats["skipped"] += 1
+
+    @staticmethod
+    def _record_size_diagnostic(
+        stats: dict,
+        entry: dict,
+        original_length: int,
+        capacity: int,
+        translated_length: int,
+        action: str,
+    ) -> None:
+        samples = stats["size_diagnostics"]
+        if len(samples) >= 25:
+            return
+        samples.append(
+            (
+                entry.get("id", "?"),
+                entry.get("category", "?"),
+                original_length,
+                capacity,
+                translated_length,
+                action,
+            )
+        )
+
+    @staticmethod
+    def _print_size_diagnostics(stats: dict) -> None:
+        expanded = stats["expanded_in_place"]
+        truncated = stats["truncated"]
+        if not expanded and not truncated:
+            return
+
+        print(
+            "ROM text size diagnostics: "
+            f"{expanded} used additional fixed-slot capacity, "
+            f"{truncated} required truncation"
+        )
+        for entry_id, category, original, capacity, translated, action in stats[
+            "size_diagnostics"
+        ]:
+            print(
+                f"  {entry_id} ({category}): original={original} bytes, "
+                f"capacity={capacity}, translated={translated} -> {action}"
+            )

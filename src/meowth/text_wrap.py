@@ -32,8 +32,8 @@ _COLOR_NAMES = {
     "transp", "yellow", "magenta", "skyblue", "darkskyblue", "black2",
 }
 
-# CJK punctuation that must not start a line
-_NO_BREAK_BEFORE = set("。，！？、）」』】〉》：；…～")
+# Closing punctuation that must not start a line
+_NO_BREAK_BEFORE = set("。，！？、）」』】〉》：；…～.,!?;:%)]}")
 
 # CJK punctuation that must not end a line (next char must stay with it)
 _NO_BREAK_AFTER = set("（「『【〈《")

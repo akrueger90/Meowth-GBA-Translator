@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Meowth GUI (Python)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/launcher.py",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true,
+      "preLaunchTask": "dev: setup mac"
+    }
+  ]
+}

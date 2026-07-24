@@ -223,6 +223,15 @@ class TranslationEngine:
             source_lang=config.source_lang,
             target_lang=config.target_lang
         )
+        glossary_term_count = getattr(self.glossary, "term_count", None)
+        if glossary_term_count is not None:
+            self._log(
+                "info",
+                (
+                    f"Official glossary loaded: {glossary_term_count} terms "
+                    f"({config.source_lang} -> {config.target_lang})"
+                ),
+            )
         self.translator = translator or Translator(
             source_lang=config.source_lang,
             target_lang=config.target_lang,
@@ -443,7 +452,11 @@ class TranslationEngine:
         for entry in table.get("entries", []):
             original = entry.get("original", "").strip('"')
             translated = entry.get("translated", "")
-            if translated and translated != original:
+            if (
+                any(character.isalnum() for character in original)
+                and any(character.isalnum() for character in translated)
+                and translated != original
+            ):
                 self.glossary.add_term(original, translated, "dynamic")
 
     def _translate_table(

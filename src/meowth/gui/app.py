@@ -162,15 +162,16 @@ class MeowthGUI(ctk.CTk):
         
         def on_settings_apply(policies: dict[str, dict[str, bool]]) -> None:
             """Handle category settings apply."""
+            self.config_form.set_category_policies(policies)
             if not self.engine:
                 self.engine = TranslationEngine(
                     config=self.config_form.get_config(),
                     stop_event=self._stop_event,
                 )
-            
-            # Update config with new policies
-            self.engine.config.category_policies = policies
-            self.config_form.config.category_policies = policies
+            else:
+                self.engine.config.category_policies = (
+                    self.config_form.get_category_policies()
+                )
             
             self.log_view.append("info", "Category policies updated.")
         

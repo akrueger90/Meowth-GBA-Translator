@@ -34,6 +34,11 @@ PROSE_FILES: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "move_descriptions": ("move_effect_prose.csv", "move_effect_id", ("short_effect", "effect")),
 }
 
+FLAVOR_FILES: dict[str, tuple[str, str]] = {
+    "ability_descriptions": ("ability_flavor_text.csv", "ability_id"),
+    "move_descriptions": ("move_flavor_text.csv", "move_id"),
+}
+
 SUPPORTED_LANGUAGES: dict[str, dict] = {
     "en":      {"pokeapi_id": 9},
     "es":      {"pokeapi_id": 7},
@@ -143,6 +148,35 @@ def build_glossary(source_lang: str, target_lang: str) -> dict:
         out_map = ability_descriptions if category == "ability_descriptions" else move_descriptions
         added = collect_prose_mapping(filename, id_col, text_columns, out_map)
         print(f"    → {added} prose entries")
+
+    for category, (filename, id_col) in FLAVOR_FILES.items():
+        print(f"  Processing {category} flavor text ({filename})…")
+        content = download_csv(filename)
+        by_id: dict[int, dict[int, list[tuple[int, str]]]] = {}
+        reader = csv.DictReader(io.StringIO(content))
+        for row in reader:
+            entity_id = int(row[id_col])
+            lang_id = int(row["language_id"])
+            version_group_id = int(row["version_group_id"])
+            text = (row.get("flavor_text") or "").strip()
+            if text:
+                by_id.setdefault(entity_id, {}).setdefault(lang_id, []).append(
+                    (version_group_id, text)
+                )
+
+        out_map = ability_descriptions if category == "ability_descriptions" else move_descriptions
+        added = 0
+        for by_lang in by_id.values():
+            source_variants = by_lang.get(source_id, [])
+            target_variants = by_lang.get(target_id, [])
+            if not source_variants or not target_variants:
+                continue
+            _, target_text = min(target_variants, key=lambda variant: variant[0])
+            for _, source_text in source_variants:
+                if source_text not in out_map:
+                    out_map[source_text] = target_text
+                    added += 1
+        print(f"    → {added} flavor entries")
 
     return {
         "source_lang": source_lang,
