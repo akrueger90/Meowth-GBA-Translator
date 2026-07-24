@@ -37,12 +37,16 @@ def _provider_kwargs(provider, api_base, api_key_env, model) -> dict:
     t = cfg.get("translation", {})
     api_cfg = t.get("api", {})
 
-    return {
+    kwargs = {
         "provider": provider or t.get("provider"),
         "api_base": api_base or api_cfg.get("base_url"),
         "api_key_env": api_key_env or api_cfg.get("key_env"),
         "model": model or t.get("model"),
     }
+    terminology_file = t.get("terminology_file")
+    if isinstance(terminology_file, str) and terminology_file.strip():
+        kwargs["terminology_path"] = Path(terminology_file).expanduser()
+    return kwargs
 
 
 def _get_language(cli_value, cli_default, config_key) -> str:
@@ -134,7 +138,7 @@ def extract(rom_path, output, metadata, source, target):
 @add_provider_options
 def translate(texts_json, output, batch_size, workers, source, target,
               provider, api_base, api_key_env, model):
-    """Translate extracted texts JSON via LLM API."""
+    """Translate extracted texts with a local model or remote LLM API."""
     source = _get_language(source, "en", "source_language")
     target = _get_language(target, "zh-Hans", "target_language")
     validate_language(source)

@@ -19,8 +19,8 @@ if ! command -v dotnet >/dev/null 2>&1; then
 fi
 
 git submodule update --init HexManiacAdvance pokeapi
-if [[ ! -x .venv/bin/python ]]; then
-    uv venv --python 3.12
+if [[ ! -x .venv/bin/python ]] || [[ "$(.venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" != "3.12" ]]; then
+    uv venv --clear --python 3.12
 fi
-uv pip install --python .venv/bin/python -e ".[gui,dev]"
+uv pip install --python .venv/bin/python -e ".[gui,dev,local]"
 dotnet build src/MeowthBridge/MeowthBridge.csproj -c Debug

@@ -8,10 +8,12 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
 from .languages import get_language_name, get_language_name_zh
+from .local_translation import DEFAULT_MODEL_ROOT, LocalTranslationBackend
 
 
 class LLMAuthenticationError(RuntimeError):
@@ -39,6 +41,7 @@ DEFAULT_CACHE_DIR = _get_default_cache_dir()
 
 # Well-known provider presets: provider_name -> (base_url, default_model, env_var)
 PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
+    "local":     ("local://argos",                         "argos-opus",          ""),
     "deepseek":  ("https://api.deepseek.com/v1",              "deepseek-chat",     "DEEPSEEK_API_KEY"),
     "openai":    ("https://api.openai.com/v1",                 "gpt-4o",            "OPENAI_API_KEY"),
     "anthropic": ("https://api.anthropic.com/v1",              "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
@@ -137,11 +140,13 @@ class Translator:
         provider: str | None = None,
         stop_event: threading.Event | None = None,
         game_context: str = "",
+        local_model_dir: Path = DEFAULT_MODEL_ROOT,
+        status_callback: Callable[[str], None] | None = None,
     ):
         # Resolve provider preset
-        self.provider = provider or ""
-        if provider and provider in PROVIDER_PRESETS:
-            preset_url, preset_model, preset_env = PROVIDER_PRESETS[provider]
+        self.provider = provider or ("custom" if base_url else "local")
+        if self.provider in PROVIDER_PRESETS:
+            preset_url, preset_model, preset_env = PROVIDER_PRESETS[self.provider]
             base_url = base_url or preset_url
             model = model or preset_model
             api_key_env = api_key_env or preset_env
@@ -158,6 +163,9 @@ class Translator:
         self.source_lang = source_lang
         self.target_lang = target_lang
         self._stop_event = stop_event
+        self.local_model_dir = Path(local_model_dir)
+        self.status_callback = status_callback
+        self._local_backend: LocalTranslationBackend | None = None
 
         # Select appropriate prompt template and fill in language names
         source_name = get_language_name(source_lang)
@@ -228,6 +236,9 @@ class Translator:
         each text individually to avoid misalignment.
         """
         self._check_stop()
+
+        if self.provider == "local":
+            return self._translate_local_batch(texts, glossary_context)
 
         is_openrouter = "openrouter.ai" in self.base_url
         is_openrouter_free_model = is_openrouter and self.model.strip().endswith(":free")
@@ -313,6 +324,86 @@ class Translator:
         from .i18n import Messages
         print(Messages.BATCH_SPLIT_MISMATCH.format(parts=len(parts), texts=len(texts)))
         return self._translate_individually(texts, glossary_context)
+
+    @property
+    def is_local(self) -> bool:
+        return self.provider == "local"
+
+    def _translate_local_batch(
+        self, texts: list[str], glossary_context: str
+    ) -> list[str]:
+        """Translate locally with per-text persistent translation memory."""
+        if self._local_backend is None:
+            self._local_backend = LocalTranslationBackend(
+                source_lang=self.source_lang,
+                target_lang=self.target_lang,
+                model_root=self.local_model_dir,
+                stop_event=self._stop_event,
+                status_callback=self.status_callback,
+            )
+
+        results: list[str | None] = [None] * len(texts)
+        misses: list[str] = []
+        miss_indexes: list[int] = []
+        miss_requests: list[dict] = []
+        for index, text in enumerate(texts):
+            relevant_glossary = self._relevant_glossary_context(
+                text, glossary_context
+            )
+            request_data = {
+                "provider": "local",
+                "model": self.model,
+                "source_lang": self.source_lang,
+                "target_lang": self.target_lang,
+                "text": text,
+                "glossary": relevant_glossary,
+            }
+            cached = self._get_cached(self._cache_key(request_data))
+            if cached is not None:
+                results[index] = cached
+            else:
+                misses.append(text)
+                miss_indexes.append(index)
+                miss_requests.append(request_data)
+
+        if misses:
+            translated = self._local_backend.translate_batch(
+                misses, glossary_context
+            )
+            if len(translated) != len(misses):
+                raise RuntimeError(
+                    "Local translation returned an unexpected number of results."
+                )
+            for index, request_data, content in zip(
+                miss_indexes, miss_requests, translated
+            ):
+                results[index] = content
+                self._save_cache(
+                    self._cache_key(request_data),
+                    request_data,
+                    content,
+                )
+
+        return [result or "" for result in results]
+
+    @staticmethod
+    def _relevant_glossary_context(text: str, glossary_context: str) -> str:
+        """Keep local translation-memory keys stable across batch composition."""
+        relevant: list[str] = []
+        for line in glossary_context.splitlines():
+            source, separator, _ = line.strip().partition("=")
+            source = source.strip()
+            if (
+                separator
+                and source
+                and re.search(
+                    r"(?<![\w])" + re.escape(source) + r"(?![\w])",
+                    text,
+                    re.IGNORECASE,
+                )
+            ):
+                relevant.append(line.strip())
+        return "\n".join(relevant)
 
     def _call_api(self, system: str, user: str, max_retries: int = 5) -> str:
         """Send a single chat completion request and return the content."""
@@ -628,4 +719,3 @@ class Translator:
         # For Latin-to-Latin translations, we can't use character set detection
         # Just check if the text is exactly the same
         return False
-

@@ -13,6 +13,7 @@ from ..font_patch import apply_font_patch
 from ..glossary import Glossary
 from ..i18n import Messages
 from ..languages import is_cjk_language
+from ..local_translation import LocalTranslationError
 from ..pcs_codes import FD_MACROS
 from ..rom_writer import RomWriter
 from ..text_wrap import wrap_text
@@ -221,7 +222,8 @@ class TranslationEngine:
         self.charmap = charmap or Charmap(target_lang=config.target_lang)
         self.glossary = glossary or Glossary(
             source_lang=config.source_lang,
-            target_lang=config.target_lang
+            target_lang=config.target_lang,
+            terminology_path=config.terminology_path,
         )
         glossary_term_count = getattr(self.glossary, "term_count", None)
         if glossary_term_count is not None:
@@ -243,6 +245,7 @@ class TranslationEngine:
             cache_dir=config.work_dir / "cache",
             stop_event=self._stop_event,
             game_context=config.game_context,
+            status_callback=lambda message: self._log("info", message),
         )
 
     def request_stop(self) -> None:
@@ -396,8 +399,12 @@ class TranslationEngine:
             for i in range(0, len(free_texts), self.config.batch_size)
         ]
         total = len(batches)
+        worker_count = (
+            1 if getattr(self.translator, "is_local", False)
+            else self.config.max_workers
+        )
         self._log("info", Messages.BATCH_PROGRESS.format(
-            total=total, workers=self.config.max_workers
+            total=total, workers=worker_count
         ))
         if total == 0:
             self._log(
@@ -412,7 +419,7 @@ class TranslationEngine:
             self._translate_free_batch(batch)
             return idx, batch
 
-        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
                 executor.submit(process_batch, (i, b)): i
                 for i, b in enumerate(batches)
@@ -514,11 +521,10 @@ class TranslationEngine:
 
             glossary_miss_count += 1
 
-            if run_llm:
-                # No glossary match: defer to table LLM fallback.
-                # (the LLM batch filters out pure control codes / garbage automatically)
-                needs_llm.append(entry)
-            else:
+            # No glossary match: defer to the provider fallback. The batch
+            # filters pure control codes and extraction garbage automatically.
+            needs_llm.append(entry)
+            if not run_llm:
                 # Keep unresolved table terms empty so manual review can fill them.
                 entry["translated"] = ""
                 unchanged_count += 1
@@ -590,6 +596,8 @@ class TranslationEngine:
                 raise
             except LLMAuthenticationError:
                 raise
+            except LocalTranslationError:
+                raise
             except Exception as e:
                 print(f"[Table batch LLM failed: {e}, keeping originals]")
                 for entry, _, _ in chunk:
@@ -621,7 +629,7 @@ class TranslationEngine:
         if not remaining:
             return
 
-        originals = [e["original"] for e in remaining]
+        originals = [e["original"].strip('"') for e in remaining]
 
         # Protect control codes
         protected_list = []
@@ -641,6 +649,8 @@ class TranslationEngine:
         except TranslationStoppedError:
             raise
         except LLMAuthenticationError:
+            raise
+        except LocalTranslationError:
             raise
         except Exception as e:
             print(f"[Batch failed after retries: {e}, keeping originals]")

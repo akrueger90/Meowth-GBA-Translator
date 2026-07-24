@@ -104,3 +104,50 @@ def test_placeholder_terms_cannot_corrupt_punctuation():
     assert glossary.lookup("") is None
     assert glossary.lookup("???") is None
     assert glossary.apply_to_text(text) == text
+
+
+def test_user_terminology_is_created_and_overrides_defaults(tmp_path):
+    terminology_path = tmp_path / "terminology.toml"
+    glossary = Glossary(
+        source_lang="en",
+        target_lang="de",
+        terminology_path=terminology_path,
+    )
+
+    assert terminology_path.exists()
+    assert glossary.lookup("HM") == "VM"
+    assert glossary.lookup("Your Partys full!") == "Dein Team ist voll!"
+    assert glossary.lookup("The BAG is full") == "Der Beutel ist voll"
+    assert glossary.lookup("Do you want the DOME FOSSIL?") == (
+        "Willst du das Domfossil?"
+    )
+
+    terminology_path.write_text(
+        '[en.de]\n"HM" = "Versteckte Maschine"\n',
+        encoding="utf-8",
+    )
+    reloaded = Glossary(
+        source_lang="en",
+        target_lang="de",
+        terminology_path=terminology_path,
+    )
+
+    assert reloaded.lookup("HM") == "Versteckte Maschine"
+
+
+def test_context_protects_pokeapi_names_and_uppercase_moves_and_items(tmp_path):
+    glossary = Glossary(
+        source_lang="en",
+        target_lang="de",
+        terminology_path=tmp_path / "terminology.toml",
+    )
+
+    terms = glossary.get_context_terms(
+        "PIKACHU used CUT near Pallet Town with the DOME FOSSIL."
+    )
+
+    assert terms["Pikachu"] == "Pikachu"
+    assert terms["Cut"] == "Zerschneider"
+    assert terms["Pallet Town"] == "Alabastia"
+    assert terms["Dome Fossil"] == "Domfossil"
+    assert "Cut" not in glossary.get_context_terms("Please cut this rope.")

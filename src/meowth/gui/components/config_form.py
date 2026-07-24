@@ -30,6 +30,22 @@ LLM_PROFILES_FILE = Path.home() / ".meowth" / "llm-profiles.json"
 _LLMProfile = dict[str, str]
 
 
+def provider_requires_api_key(provider: str) -> bool:
+    """Return whether a translation provider requires remote credentials."""
+    return provider != "local"
+
+
+def provider_runtime_defaults(provider: str) -> tuple[int, int]:
+    """Return fixed batch and worker values tuned for each provider."""
+    if provider == "local":
+        return 16, 1
+    if provider == "groq":
+        return 6, 2
+    if provider == "openrouter":
+        return 4, 1
+    return 30, 10
+
+
 def load_llm_profiles(path: Path = LLM_PROFILES_FILE) -> dict[str, _LLMProfile]:
     """Load named LLM profiles from disk."""
     if not path.exists():
@@ -69,8 +85,6 @@ def load_form_state(path: Path = STATE_FILE_PATH) -> dict[str, object]:
     for key, value in data.items():
         if isinstance(value, (str, bool)):
             state[key] = value
-        elif key == "category_policies" and isinstance(value, dict):
-            state[key] = value
     return state
 
 
@@ -87,11 +101,6 @@ class ConfigForm(ctk.CTkFrame):
     def __init__(self, master):
         """Initialize configuration form."""
         super().__init__(master, corner_radius=12, fg_color=("gray95", "gray14"))
-        self._category_policies = {
-            category: policy.copy()
-            for category, policy in TranslationConfig().category_policies.items()
-        }
-
         # Use a regular frame, not scrollable - the parent handles scrolling
         inner = ctk.CTkFrame(self, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=14, pady=12)
@@ -141,8 +150,8 @@ class ConfigForm(ctk.CTkFrame):
         self.target_lang.set("Chinese")
         self.target_lang.pack(fill="x")
 
-        # --- LLM Profiles ---
-        ctk.CTkLabel(inner, text="LLM Profiles", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
+        # --- Provider Profiles ---
+        ctk.CTkLabel(inner, text="Provider Profiles", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
         profile_row = ctk.CTkFrame(inner, fg_color="transparent")
         profile_row.pack(fill="x", pady=(0, 8))
         self._profiles: dict[str, _LLMProfile] = load_llm_profiles()
@@ -160,7 +169,7 @@ class ConfigForm(ctk.CTkFrame):
         ).pack(side="right")
 
         # --- Provider + Model ---
-        ctk.CTkLabel(inner, text="LLM Provider", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
+        ctk.CTkLabel(inner, text="Translation Provider", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
         pm_row = ctk.CTkFrame(inner, fg_color="transparent")
         pm_row.pack(fill="x", pady=(0, 8))
 
@@ -173,7 +182,7 @@ class ConfigForm(ctk.CTkFrame):
             state="readonly",
             height=5,
         )
-        self.provider.set("deepseek")
+        self.provider.set("local")
         self.provider.bind("<<ComboboxSelected>>", lambda e: self._on_provider_change(self.provider.get()))
         self.provider.bind("<<ComboboxSelected>>", lambda e: self._auto_save_config(), add=True)
         self.provider.pack(fill="x")
@@ -182,13 +191,13 @@ class ConfigForm(ctk.CTkFrame):
         model_frame.pack(side="right", fill="both", expand=True, padx=(6, 0))
         ctk.CTkLabel(model_frame, text="Model:", font=("", 10)).pack(anchor="w", pady=(0, 2))
         self.model_entry = ctk.CTkEntry(model_frame, height=32, corner_radius=8)
-        self.model_entry.insert(0, PROVIDER_PRESETS["deepseek"][1])
+        self.model_entry.insert(0, PROVIDER_PRESETS["local"][1])
         self.model_entry.pack(fill="x")
         # Bind to focus-out event to save when user finishes editing the model
         self.model_entry.bind("<FocusOut>", lambda e: self._auto_save_config())
 
         # --- API Key ---
-        ctk.CTkLabel(inner, text="API Key", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
+        ctk.CTkLabel(inner, text="API Key (remote providers only)", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
         self.api_key_entry = ctk.CTkEntry(
             inner,
             placeholder_text="sk-xxxxxxxxxxxxxxxxxxxxxxxx",
@@ -199,61 +208,7 @@ class ConfigForm(ctk.CTkFrame):
         # Bind to focus-out event to save when user finishes editing the API key
         self.api_key_entry.bind("<FocusOut>", lambda e: self._auto_save_config())
 
-        # --- Game Context ---
-        ctk.CTkLabel(inner, text="Game Context (optional)", font=("", 11, "bold")).pack(anchor="w", pady=(8, 4))
-        ctk.CTkLabel(
-            inner,
-            text="Describe the game so the LLM can translate more accurately (setting, tone, character names, etc.)",
-            font=("", 10),
-            text_color=("gray45", "gray55"),
-            wraplength=380,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 4))
-        self.game_context_entry = ctk.CTkTextbox(
-            inner, height=72, corner_radius=8, wrap="word",
-        )
-        self.game_context_entry.pack(fill="x", pady=(0, 8))
-        self.game_context_entry.bind("<FocusOut>", lambda e: self._auto_save_config())
-
-        # --- Advanced (collapsible) ---
-        self.advanced_visible = False
-        self.advanced_button = ctk.CTkButton(
-            inner, text="+ Advanced Settings", command=self._toggle_advanced,
-            fg_color="transparent", text_color=("gray45", "gray55"),
-            hover_color=("gray85", "gray25"), height=26, font=("", 11),
-            anchor="w",
-        )
-        self.advanced_button.pack(anchor="w", pady=(4, 0))
-
-        self.advanced_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        # All three advanced fields in one compact row
-        adv_row_compact = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        adv_row_compact.pack(fill="x", pady=(6, 0))
-
-        bf_compact = ctk.CTkFrame(adv_row_compact, fg_color="transparent")
-        bf_compact.pack(side="left", fill="both", expand=True, padx=(0, 4))
-        ctk.CTkLabel(bf_compact, text="Batch:", font=("", 9)).pack(anchor="w", pady=(0, 2))
-        self.batch_size = ctk.CTkEntry(bf_compact, height=28, corner_radius=6)
-        self.batch_size.insert(0, "30")
-        self.batch_size.pack(fill="x")
-
-        wf_compact = ctk.CTkFrame(adv_row_compact, fg_color="transparent")
-        wf_compact.pack(side="left", fill="both", expand=True, padx=(4, 4))
-        ctk.CTkLabel(wf_compact, text="Workers:", font=("", 9)).pack(anchor="w", pady=(0, 2))
-        self.max_workers = ctk.CTkEntry(wf_compact, height=28, corner_radius=6)
-        self.max_workers.insert(0, "10")
-        self.max_workers.pack(fill="x")
-
-        tlf_compact = ctk.CTkFrame(adv_row_compact, fg_color="transparent")
-        tlf_compact.pack(side="left", fill="both", expand=True, padx=(4, 0))
-        ctk.CTkLabel(tlf_compact, text="Test:", font=("", 9)).pack(anchor="w", pady=(0, 2))
-        self.test_limit_texts = ctk.CTkEntry(tlf_compact, height=28, corner_radius=6)
-        self.test_limit_texts.insert(0, "")
-        self.test_limit_texts.pack(fill="x")
-        ctk.CTkLabel(
-            tlf_compact, text="0=all",
-            font=("", 8), text_color=("gray55", "gray50"),
-        ).pack(anchor="w", pady=(2, 0))
+        self._on_provider_change(self.provider.get())
 
     def _on_profile_select(self, name: str) -> None:
         """Load a saved LLM profile into the provider/model/api_key fields."""
@@ -263,6 +218,7 @@ class ConfigForm(ctk.CTkFrame):
         provider = profile.get("provider", "")
         if provider and provider in PROVIDER_PRESETS:
             self.provider.set(provider)
+            self._on_provider_change(provider)
         model = profile.get("model", "")
         if model:
             self._set_entry_value(self.model_entry, model)
@@ -299,16 +255,10 @@ class ConfigForm(ctk.CTkFrame):
         if preset:
             self.model_entry.delete(0, "end")
             self.model_entry.insert(0, preset[1])
-        if provider_name == "groq":
-            # Free Groq accounts are heavily TPM-limited.
-            # Safer defaults reduce rate-limit failures.
-            self._set_entry_value(self.batch_size, "6")
-            self._set_entry_value(self.max_workers, "2")
-        elif provider_name == "openrouter":
-            # OpenRouter free-tier keys can also be easily throttled.
-            # Conservative defaults avoid immediate 429 storms.
-            self._set_entry_value(self.batch_size, "4")
-            self._set_entry_value(self.max_workers, "1")
+        if hasattr(self, "api_key_entry"):
+            self.api_key_entry.configure(
+                state="disabled" if provider_name == "local" else "normal"
+            )
 
     def _browse_rom(self):
         """Open file dialog to select ROM."""
@@ -328,17 +278,6 @@ class ConfigForm(ctk.CTkFrame):
         if dirname:
             self.output_entry.delete(0, "end")
             self.output_entry.insert(0, dirname)
-
-    def _toggle_advanced(self):
-        """Toggle advanced settings visibility."""
-        if self.advanced_visible:
-            self.advanced_frame.pack_forget()
-            self.advanced_button.configure(text="+ Advanced Settings")
-            self.advanced_visible = False
-        else:
-            self.advanced_frame.pack(fill="x", pady=(4, 0))
-            self.advanced_button.configure(text="− Advanced Settings")
-            self.advanced_visible = True
 
     def _lang_name_to_code(self, name: str) -> str:
         return LANGUAGES.get(name, "en")
@@ -361,12 +300,6 @@ class ConfigForm(ctk.CTkFrame):
             "provider": self.provider.get().strip(),
             "model": self.model_entry.get().strip(),
             "api_key": self.api_key_entry.get(),
-            "batch_size": self.batch_size.get().strip(),
-            "max_workers": self.max_workers.get().strip(),
-            "test_limit_texts": self.test_limit_texts.get().strip(),
-            "game_context": self.game_context_entry.get("1.0", "end-1c"),
-            "advanced_visible": self.advanced_visible,
-            "category_policies": self.get_category_policies(),
         }
 
     def apply_state(self, state: dict[str, object]) -> None:
@@ -391,6 +324,7 @@ class ConfigForm(ctk.CTkFrame):
         provider = state.get("provider")
         if isinstance(provider, str) and provider in PROVIDER_PRESETS:
             self.provider.set(provider)
+            self._on_provider_change(provider)
 
         model = state.get("model")
         if isinstance(model, str):
@@ -406,31 +340,6 @@ class ConfigForm(ctk.CTkFrame):
             self.profile_combo.set(llm_profile)
             self._on_profile_select(llm_profile)
 
-        batch_size = state.get("batch_size")
-        if isinstance(batch_size, str):
-            self._set_entry_value(self.batch_size, batch_size)
-
-        max_workers = state.get("max_workers")
-        if isinstance(max_workers, str):
-            self._set_entry_value(self.max_workers, max_workers)
-
-        test_limit_texts = state.get("test_limit_texts")
-        if isinstance(test_limit_texts, str):
-            self._set_entry_value(self.test_limit_texts, test_limit_texts)
-
-        game_context = state.get("game_context")
-        if isinstance(game_context, str):
-            self.game_context_entry.delete("1.0", "end")
-            self.game_context_entry.insert("1.0", game_context)
-
-        advanced_visible = state.get("advanced_visible")
-        if isinstance(advanced_visible, bool) and advanced_visible != self.advanced_visible:
-            self._toggle_advanced()
-
-        category_policies = state.get("category_policies")
-        if isinstance(category_policies, dict):
-            self.set_category_policies(category_policies)
-
     def load_state(self, path: Path = STATE_FILE_PATH) -> None:
         """Load saved form values from disk, if present."""
         self.apply_state(load_form_state(path))
@@ -439,50 +348,13 @@ class ConfigForm(ctk.CTkFrame):
         """Write current form values to disk."""
         save_form_state(self.get_state(), path)
 
-    def set_category_policies(self, policies: dict[str, object]) -> None:
-        """Store a validated copy of category translation policies."""
-        normalized: dict[str, dict[str, bool]] = {}
-        for category, policy in policies.items():
-            if not isinstance(category, str) or not isinstance(policy, dict):
-                continue
-            use_glossary = policy.get("use_glossary")
-            use_llm = policy.get("use_llm")
-            if isinstance(use_glossary, bool) and isinstance(use_llm, bool):
-                normalized[category] = {
-                    "use_glossary": use_glossary,
-                    "use_llm": use_llm,
-                }
-        if normalized:
-            self._category_policies = normalized
-
-    def get_category_policies(self) -> dict[str, dict[str, bool]]:
-        """Return an independent copy of category translation policies."""
-        return {
-            category: policy.copy()
-            for category, policy in self._category_policies.items()
-        }
-
-    def requires_llm(self) -> bool:
-        """Return whether any configured category can call the LLM."""
-        return any(
-            policy.get("use_llm", True)
-            for policy in self._category_policies.values()
-        )
-
     def get_config(self) -> TranslationConfig:
         """Get current configuration."""
         provider = self.provider.get()
         preset = PROVIDER_PRESETS.get(provider)
         api_key = self.api_key_entry.get().strip()
         model_value = self.model_entry.get().strip() or (preset[1] if preset else None)
-        batch_value = int(self.batch_size.get()) if self.batch_size.get().isdigit() else 30
-        workers_value = int(self.max_workers.get()) if self.max_workers.get().isdigit() else 10
-
-        # Safety guard for stale saved profiles/state: OpenRouter free-tier keys
-        # are easily throttled when old high-concurrency values are restored.
-        if provider == "openrouter":
-            workers_value = min(workers_value, 1)
-            batch_value = min(batch_value, 4)
+        batch_value, workers_value = provider_runtime_defaults(provider)
 
         defaults = TranslationConfig()
 
@@ -495,9 +367,6 @@ class ConfigForm(ctk.CTkFrame):
             output_dir = defaults.output_dir
             work_dir = defaults.work_dir
 
-        test_limit_value = self.test_limit_texts.get().strip()
-        test_limit = int(test_limit_value) if test_limit_value and test_limit_value.isdigit() and int(test_limit_value) > 0 else None
-
         return TranslationConfig(
             source_lang=self._lang_name_to_code(self.source_lang.get()),
             target_lang=self._lang_name_to_code(self.target_lang.get()),
@@ -507,13 +376,13 @@ class ConfigForm(ctk.CTkFrame):
             api_key=api_key if api_key else None,
             batch_size=batch_value,
             max_workers=workers_value,
-            test_limit_texts=test_limit,
+            llm_for_tables=True,
+            test_limit_texts=None,
             use_env_test_limit=False,
-            game_context=self.game_context_entry.get("1.0", "end-1c").strip(),
+            game_context="",
             rom_path=Path(self.rom_entry.get()) if self.rom_entry.get() else None,
             output_dir=output_dir,
             work_dir=work_dir,
-            category_policies=self.get_category_policies(),
         )
 
     def validate(self) -> tuple[bool, str]:
@@ -524,7 +393,10 @@ class ConfigForm(ctk.CTkFrame):
         if not rom_path.exists():
             return False, f"ROM file not found: {rom_path}"
 
-        if self.requires_llm() and not self.api_key_entry.get().strip():
+        if (
+            provider_requires_api_key(self.provider.get())
+            and not self.api_key_entry.get().strip()
+        ):
             provider = self.provider.get()
             preset = PROVIDER_PRESETS.get(provider)
             env_var = preset[2] if preset and len(preset) > 2 else None

@@ -54,6 +54,7 @@ class MeowthGUI(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.engine = None
+        self._review_engine = None
         self.translation_thread = None
         self.is_running = False
         self._stop_event = threading.Event()
@@ -107,10 +108,6 @@ class MeowthGUI(ctk.CTk):
             self._prepare_workspace()
             return
 
-        if action == "category_settings":
-            self._show_category_settings()
-            return
-
         if action == "build_rom":
             self._build_from_run_files(finalize=False)
             return
@@ -155,32 +152,6 @@ class MeowthGUI(ctk.CTk):
             if isinstance(start_key, str) and start_key:
                 self._start_review_job("resume_from_row", translated_path, start_key)
             return
-
-    def _show_category_settings(self):
-        """Open category settings dialog."""
-        from .components import CategorySettingsDialog
-        
-        def on_settings_apply(policies: dict[str, dict[str, bool]]) -> None:
-            """Handle category settings apply."""
-            self.config_form.set_category_policies(policies)
-            if not self.engine:
-                self.engine = TranslationEngine(
-                    config=self.config_form.get_config(),
-                    stop_event=self._stop_event,
-                )
-            else:
-                self.engine.config.category_policies = (
-                    self.config_form.get_category_policies()
-                )
-            
-            self.log_view.append("info", "Category policies updated.")
-        
-        # Show dialog
-        dialog = CategorySettingsDialog(
-            self,
-            category_policies=self.config_form.get_config().category_policies,
-            on_apply=on_settings_apply,
-        )
 
     def _auto_refresh_review_panel(self):
         """Keep embedded review panel in sync while translation is active."""
@@ -748,10 +719,19 @@ class MeowthGUI(ctk.CTk):
         return resumables[0]
 
     def _ensure_engine_for_review(self):
-        # Always recreate from current form config so profile switches take effect.
+        """Reuse the review engine until its effective configuration changes."""
         config = self.config_form.get_config()
+        if (
+            self.engine is self._review_engine
+            and self._review_engine is not None
+            and self._review_engine.config == config
+            and not self._review_engine._stop_event.is_set()
+        ):
+            return
+
         callbacks = GUICallbacks(self, self.log_view)
         self.engine = TranslationEngine(config, callbacks)
+        self._review_engine = self.engine
 
     def _get_review_text_limit(self) -> int | None:
         """Return effective text limit for review actions, if configured."""

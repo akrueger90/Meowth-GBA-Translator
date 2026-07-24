@@ -1,18 +1,12 @@
 [translation]
-# LLM provider preset. Supported: deepseek, openai, google, groq, mistral,
-# openrouter, siliconflow, zhipu, moonshot, qwen, anthropic
-# Each preset auto-configures base_url, default model, and API key env var.
-provider = "deepseek"
-model = "deepseek-chat"
+# Free offline translation. The language-pair model downloads on first use.
+provider = "local"
+model = "argos-opus"
 source_language = "en"
 target_language = "zh-Hans"
+llm_for_tables = true
 
-[translation.api]
-# Environment variable that holds the API key.
-# Set the actual key in .env or your shell: export DEEPSEEK_API_KEY=sk-xxx
-key_env = "DEEPSEEK_API_KEY"
-# Uncomment to use a custom OpenAI-compatible endpoint:
-# base_url = "https://api.deepseek.com/v1"
+# Remote providers can add a [translation.api] section with key_env/base_url.
 
 [font_patch]
 armips_path = "tools/armips"

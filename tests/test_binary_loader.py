@@ -49,7 +49,10 @@ def test_download_uses_versioned_architecture_specific_cache(tmp_path, monkeypat
 
     executable = loader._download_meowth_bridge()
 
-    assert captured_url.endswith("/v1.2.3/MeowthBridge-macos-x64.zip")
+    assert captured_url == (
+        "https://github.com/akrueger90/Meowth-GBA-Translator/"
+        "releases/download/v1.2.3/MeowthBridge-macos-x64.zip"
+    )
     assert executable == (
         home
         / ".meowth"

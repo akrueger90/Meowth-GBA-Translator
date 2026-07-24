@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .languages import SUPPORTED_LANGUAGES
 from .resource_path import get_resource_path
+from .terminology import load_terminology
 
 POKEAPI_DIR = get_resource_path("pokeapi/data/v2/csv")
 
@@ -157,6 +158,7 @@ class Glossary:
         pokeapi_dir: Path = POKEAPI_DIR,
         source_lang: str = "en",
         target_lang: str = "zh-Hans",
+        terminology_path: Path | None = None,
     ):
         self.source_lang = source_lang
         self.target_lang = target_lang
@@ -198,6 +200,13 @@ class Glossary:
         overrides = MANUAL_OVERRIDES.get(target_lang, {})
         for source, target in overrides.items():
             self._index_term(source, target, "manual")
+
+        for source, target in load_terminology(
+            source_lang,
+            target_lang,
+            terminology_path,
+        ).items():
+            self._index_term(source, target, "terminology")
 
     @property
     def term_count(self) -> int:
@@ -520,7 +529,30 @@ class Glossary:
 
         return self._replacement_pattern.sub(replace, text)
 
-    def get_context_terms(self, text: str, limit: int = 20) -> dict[str, str]:
+    @staticmethod
+    def _term_occurs(
+        text: str,
+        source: str,
+        *,
+        uppercase_only: bool,
+    ) -> bool:
+        pattern = re.compile(
+            r"(?<![\w])" + re.escape(source) + r"(?![\w])",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(text):
+            if not uppercase_only:
+                return True
+            letters = [character for character in match.group(0) if character.isalpha()]
+            if letters and all(character.isupper() for character in letters):
+                return True
+        return False
+
+    def get_context_terms(
+        self,
+        text: str,
+        limit: int | None = None,
+    ) -> dict[str, str]:
         """Find terms in text that have known translations (for LLM context).
 
         Only includes proper nouns (Pokemon names, locations, regions) to avoid
@@ -532,11 +564,20 @@ class Glossary:
         found: dict[str, str] = {}
         text_upper = text.upper()
         for upper_key, (source, target, category) in self._upper_index.items():
-            # Include safe categories (proper nouns) and manual overrides
-            if category not in CONTEXT_SAFE_CATEGORIES and category not in ("manual", "dynamic"):
+            always_safe = (
+                category in CONTEXT_SAFE_CATEGORIES
+                or category in ("manual", "dynamic", "terminology")
+            )
+            if not always_safe and category not in CONTEXT_UNSAFE_CATEGORIES:
                 continue
-            if upper_key in text_upper:
+            if upper_key not in text_upper:
+                continue
+            if self._term_occurs(
+                text,
+                source,
+                uppercase_only=not always_safe,
+            ):
                 found[source] = target
-                if len(found) >= limit:
+                if limit is not None and len(found) >= limit:
                     break
         return found

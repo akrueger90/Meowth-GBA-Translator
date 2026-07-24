@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..toml_compat import load_toml_file
+from ..terminology import DEFAULT_TERMINOLOGY_PATH
 
 
 def _get_default_work_dir() -> Path:
@@ -41,16 +42,16 @@ def _get_default_category_policies() -> dict[str, dict[str, bool]]:
         - use_llm: Use LLM fallback if glossary misses
     """
     return {
-        # Names: glossary-only (PokeAPI has authoritative translations)
-        "pokemon_names": {"use_glossary": True, "use_llm": False},
-        "move_names": {"use_glossary": True, "use_llm": False},
-        "ability_names": {"use_glossary": True, "use_llm": False},
-        "item_names": {"use_glossary": True, "use_llm": False},
-        "type_names": {"use_glossary": True, "use_llm": False},
-        "nature_names": {"use_glossary": True, "use_llm": False},
-        "trainer_classes": {"use_glossary": True, "use_llm": False},
-        "map_names": {"use_glossary": True, "use_llm": False},
-        # Descriptions: glossary-first, LLM fallback for better context
+        # Names: authoritative PokeAPI translation first, provider fallback
+        "pokemon_names": {"use_glossary": True, "use_llm": True},
+        "move_names": {"use_glossary": True, "use_llm": True},
+        "ability_names": {"use_glossary": True, "use_llm": True},
+        "item_names": {"use_glossary": True, "use_llm": True},
+        "type_names": {"use_glossary": True, "use_llm": True},
+        "nature_names": {"use_glossary": True, "use_llm": True},
+        "trainer_classes": {"use_glossary": True, "use_llm": True},
+        "map_names": {"use_glossary": True, "use_llm": True},
+        # Descriptions: glossary-first, provider fallback
         "ability_descriptions": {"use_glossary": True, "use_llm": True},
         "move_descriptions": {"use_glossary": True, "use_llm": True},
         "battle_text": {"use_glossary": True, "use_llm": True},
@@ -81,10 +82,11 @@ class TranslationConfig:
     # Translation settings
     batch_size: int = 30
     max_workers: int = 10
-    llm_for_tables: bool = False
+    llm_for_tables: bool = True
     test_limit_texts: int | None = None  # For testing: limit to N texts (None or 0 = all texts)
     use_env_test_limit: bool = True
     category_policies: dict[str, dict[str, bool]] = field(default_factory=_get_default_category_policies)
+    terminology_path: Path = field(default_factory=lambda: DEFAULT_TERMINOLOGY_PATH)
 
     # File paths
     rom_path: Path | None = None
@@ -152,14 +154,17 @@ class TranslationConfig:
         return cls(
             source_lang=translation.get("source_language", "en"),
             target_lang=translation.get("target_language", "zh-Hans"),
-            provider=translation.get("provider"),
+            provider=translation.get("provider", "local"),
             api_base=api.get("base_url"),
             api_key_env=api.get("key_env"),
-            model=translation.get("model"),
+            model=translation.get("model", "argos-opus"),
             batch_size=translation.get("batch_size", 30),
             max_workers=translation.get("max_workers", 10),
-            llm_for_tables=translation.get("llm_for_tables", False),
+            llm_for_tables=translation.get("llm_for_tables", True),
             category_policies=category_policies,
+            terminology_path=Path(
+                translation.get("terminology_file", DEFAULT_TERMINOLOGY_PATH)
+            ).expanduser(),
         )
 
     @classmethod
@@ -202,6 +207,11 @@ class TranslationConfig:
             max_workers=self.max_workers if self.max_workers != 10 else toml_config.max_workers,
             llm_for_tables=self.llm_for_tables,
             category_policies=self.category_policies,
+            terminology_path=(
+                self.terminology_path
+                if self.terminology_path != DEFAULT_TERMINOLOGY_PATH
+                else toml_config.terminology_path
+            ),
             rom_path=self.rom_path or toml_config.rom_path,
             output_dir=self.output_dir if self.output_dir != Path("outputs") else toml_config.output_dir,
             work_dir=self.work_dir if self.work_dir != Path("work") else toml_config.work_dir,

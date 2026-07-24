@@ -1,474 +1,303 @@
 # Meowth GBA Translator
 
-<div align="center">
+[![Tests](https://github.com/akrueger90/Meowth-GBA-Translator/actions/workflows/test.yml/badge.svg)](https://github.com/akrueger90/Meowth-GBA-Translator/actions/workflows/test.yml)
+[![Desktop builds](https://github.com/akrueger90/Meowth-GBA-Translator/actions/workflows/build-gui.yml/badge.svg)](https://github.com/akrueger90/Meowth-GBA-Translator/actions/workflows/build-gui.yml)
+[![Version](https://img.shields.io/badge/version-0.3.6-green.svg)](https://github.com/akrueger90/Meowth-GBA-Translator/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org)
-[![Version](https://img.shields.io/badge/Version-0.3.5-green.svg)](https://github.com/Olcmyk/Meowth-GBA-Translator/releases)
+Meowth translates text in Pokémon Game Boy Advance ROMs and writes it back
+without limiting translated labels to the original string length. It combines
+official PokeAPI terminology with a free local translation model and provides
+both a desktop GUI and CLI.
 
-**Languages** | [中文](./README.zh.md) | [Français](./README.fr.md) | [Deutsch](./README.de.md) | [Italiano](./README.it.md) | [Español](./README.es.md)
+> Use only ROMs that you are legally allowed to modify. ROM files are never
+> included in this repository or its releases.
 
-An intelligent GBA Pokémon ROM translator powered by LLM with both GUI and CLI interfaces
+## Highlights
 
-</div>
+- Free offline translation through CTranslate2 and Argos/OpenNMT models
+- Official Pokémon, move, ability, item and location names from PokeAPI
+- Editable Pokémon terminology without rebuilding the application
+- Safe relocation of texts that are longer than their original ROM slots
+- Preservation of ROM control codes, page breaks and placeholders
+- Integrated review, manual correction, retry and resumable runs
+- Optional OpenAI-compatible cloud providers
+- Desktop builds for Windows x64, Linux x64, macOS Intel and Apple Silicon
 
----
+## Download
 
-## Project Overview
+Download a packaged desktop application from
+[GitHub Releases](https://github.com/akrueger90/Meowth-GBA-Translator/releases):
 
-**Meowth GBA Translator** is a comprehensive tool designed for translating Pokémon Game Boy Advance (GBA) ROMs. It combines automated text extraction, AI-powered intelligent translation, and ROM building functionality to greatly simplify the translation workflow.
+| Platform | Release asset |
+| --- | --- |
+| Windows x64 | `Meowth-Translator-Windows-x64.zip` |
+| Linux x64 | `Meowth-Translator-Linux-x64.tar.gz` |
+| macOS Intel | `Meowth-Translator-macOS-x64.dmg` |
+| macOS Apple Silicon | `Meowth-Translator-macOS-arm64.dmg` |
 
-### Key Features
+The applications are currently unsigned. Windows SmartScreen or macOS
+Gatekeeper can therefore show a warning on first launch.
 
-- **Dual Interface Support**: User-friendly GUI and powerful CLI
-- **AI Translation**: Support for 11+ LLM providers (OpenAI, DeepSeek, Google Gemini, etc.)
-- **Cross-Platform**: Support for macOS, Windows, Linux
-- **Six Language Support**: English, Spanish, French, German, Italian, Chinese
-- **Efficient Workflow**: Extract → Translate → Build in one command
-- **Completely Free**: 100% open source, MIT license
-- **Smart Font Library**: Automatic font injection for Chinese translations
+## GUI guide
 
+Start the application, select a ROM and work from left to right.
 
-## Installation
+### Configuration
 
-### Method 1: GUI Application (Recommended for Most Users)
+| Field | Meaning |
+| --- | --- |
+| **ROM File** | Source `.gba` ROM. The source file is never overwritten. |
+| **Output Directory** | Final ROMs, work files and resumable runs. |
+| **Source / Target** | Languages used for PokeAPI and model translation. |
+| **Provider Profiles** | Optional saved provider/model/API-key combinations. |
+| **Provider** | Use `local` for free offline translation or select a cloud provider. |
+| **Model** | Local model identifier or remote model name. |
+| **API Key** | Required only for remote providers; disabled for `local`. |
 
-Download the latest version:
+Batch sizes, worker counts, table fallback and other internal settings are
+selected automatically for the provider. The old Game Context, Advanced and
+Category Settings panels are intentionally no longer needed.
 
-- **macOS**: [Meowth-Translator-macOS.dmg](https://github.com/Olcmyk/Meowth-GBA-Translator/releases)
-- **Windows**: [Meowth-Translator-Windows.zip](https://github.com/Olcmyk/Meowth-GBA-Translator/releases)
+### Translation workflow
 
-**System Requirements**:
-- macOS 10.13+ or Windows 10+
-- No installation needed, run directly after download
+1. **Prepare** copies the ROM into a resumable run, refreshes PokeAPI data and
+   extracts all supported text.
+2. **Start** translates PokeAPI matches first and sends only unresolved text to
+   the selected provider. With an active category filter, only that category is
+   processed.
+3. **Stop** requests a safe cancellation. Completed work remains on disk.
+4. Inspect the **Review** table. Red entries are suspected to be untranslated.
+5. Use **LLM Selected** to retry selected rows or edit a row and choose
+   **Save Manual**.
+6. **Build Rom** creates a ROM from the current translations without closing
+   the run.
+7. **Finalize** builds the ROM, archives the run and removes it from the active
+   work list.
 
-### Method 2: Python Package (For Developers/CLI Users)
+Additional review controls:
 
-```bash
-# Install CLI only
-pip install meowth
+- **Refresh** reloads the current translation file.
+- **Select Suspects** selects all suspicious rows.
+- **Next Untranslated** jumps to the next empty translation.
+- Category buttons filter the review list.
 
-# Or install with GUI support
-pip install meowth[gui]
+## Translation behavior
+
+The translation pipeline uses this fixed order:
+
+1. Match official PokeAPI names and descriptions.
+2. Apply user terminology and known ROM variants.
+3. Protect matched Pokémon names and ROM control codes.
+4. Translate unresolved table entries and dialogue with the configured
+   provider.
+5. Wrap and encode text for the target ROM.
+
+Official Pokémon, region and location names are protected case-insensitively in
+dialogue. Ambiguous move and item names are protected when the ROM uses their
+uppercase name, such as `CUT` or `DOME FOSSIL`, avoiding false matches with
+ordinary English words.
+
+### Free local model
+
+Select the `local` provider to translate without an API key or usage limit. The
+language-pair model is downloaded once to:
+
+```text
+~/.meowth/models/argos
 ```
 
-**System Requirements**:
-- Python 3.10 or higher
-- pip package manager
+The first run requires internet access. Later translations work offline.
 
-### Method 3: Build from Source
+### Editable terminology
+
+Meowth creates this file on first use:
+
+```text
+~/.meowth/terminology.toml
+```
+
+It contains language-specific terms and complete phrase overrides:
+
+```toml
+["en"."de"]
+"HM" = "VM"
+"HP" = "KP"
+"LOST WOODS" = "Verlorener Wald"
+"Deposit in which BOX?" = "In welcher Box ablegen?"
+```
+
+Edit the file and restart Meowth. No rebuild is necessary. Longer phrase
+matches take priority, and changed terms automatically produce new translation
+cache keys.
+
+## Install from source
+
+### Requirements
+
+- Python 3.12 recommended
+- .NET 8 SDK
+- CMake and a C/C++ compiler for armips
+- Git with submodule support
+
+### macOS
 
 ```bash
-# Clone repository
-git clone https://github.com/Olcmyk/Meowth-GBA-Translator.git
+git clone --recurse-submodules https://github.com/akrueger90/Meowth-GBA-Translator.git
 cd Meowth-GBA-Translator
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install in development mode
-pip install -e ".[gui,dev]"
-
-# Run GUI
-meowth-gui
-
-# Or use CLI
-meowth full pokemon.gba --provider deepseek
+bash scripts/setup-dev-macos.sh
+./.venv/bin/meowth-gui
 ```
 
-### macOS local development (VS Code)
+VS Code also provides the `dev: setup mac` task and the
+`Meowth GUI (Python)` launch configuration.
 
-For local run + debug on macOS, this repository includes ready-to-use VS Code config:
+### Other platforms
 
 ```bash
-# One-time local setup
-python -m pip install -e ".[gui,dev]"
+git clone --recurse-submodules https://github.com/akrueger90/Meowth-GBA-Translator.git
+cd Meowth-GBA-Translator
+python3.12 -m venv .venv
 
-# Build local MeowthBridge used by Python extract/build stages
+# Linux/macOS
+./.venv/bin/python -m pip install -e ".[gui,dev,local]"
+./.venv/bin/meowth-gui
+
+# Windows PowerShell
+.\.venv\Scripts\python.exe -m pip install -e ".[gui,dev,local]"
+.\.venv\Scripts\meowth-gui.exe
+```
+
+Build the bridge if no matching packaged binary is present:
+
+```bash
 dotnet build src/MeowthBridge/MeowthBridge.csproj -c Debug
 ```
 
-Then in VS Code:
+## CLI
 
-- Run task: `dev: setup mac`
-- Start debugger: `Meowth GUI (Python)` for GUI workflow
-- Or start debugger: `Meowth CLI full (prompt ROM path)` for CLI pipeline
-
-Notes:
-
-- Local `src/MeowthBridge/bin/...` builds are preferred automatically over bundled downloads.
-- On macOS, if .NET is installed in `~/.dotnet`, runtime env vars are auto-wired by the loader.
-
----
-
-## Quick Start
-
-### Using GUI (Easiest)
-
-![GUI Screenshot](https://raw.githubusercontent.com/Olcmyk/Meowth-GBA-Translator/main/images/gui-screenshot.png)
-
-1. Download and run **Meowth Translator**
-2. Click "Select ROM" and choose your GBA Pokémon ROM
-3. Configure translation settings:
-   - **LLM Provider**: Select LLM provider (OpenAI, DeepSeek, etc.)
-   - **Source Language**: Usually "English"
-   - **Target Language**: Your desired language
-4. Click "Start Translation"
-5. Wait for completion (typically 5-30 minutes depending on ROM size)
-6. Download the translated ROM from the output folder
-
-![Translation Comparison](https://raw.githubusercontent.com/Olcmyk/Meowth-GBA-Translator/main/images/translation-comparison.jpg)
-*Left: Original game | Right: Translated game*
-
-### Using CLI
-
-#### Step 1: Configure API Key
-
-First, set your API key as an environment variable:
-
-```bash
-# DeepSeek (Recommended)
-export DEEPSEEK_API_KEY="sk-your-key"
-
-# Or other providers
-export OPENAI_API_KEY="sk-your-key"
-export GOOGLE_API_KEY="your-key"
-```
-
-#### Step 2: Run Translation
-
-```bash
-# Run complete translation pipeline
-meowth full pokemon_firered.gba \
-  --provider deepseek \
-  --source en \
-  --target en \
-  --output-dir translated_roms
-
-# Translated ROM will be saved to: translated_roms/pokemon_firered_en.gba
-```
-
----
-
-## Supported LLM Providers
-
-| Provider | Default Model | API Key |
-|----------|---------------|---------|
-| **DeepSeek** | deepseek-chat | `DEEPSEEK_API_KEY` |
-| **OpenAI** | gpt-4o | `OPENAI_API_KEY` |
-| **Google Gemini** | gemini-2.0-flash | `GOOGLE_API_KEY` |
-| **Claude (Anthropic)** | claude-sonnet-4 | `ANTHROPIC_API_KEY` |
-| **Groq** | llama-3.3-70b | `GROQ_API_KEY` |
-| **Mistral** | mistral-large-latest | `MISTRAL_API_KEY` |
-| **OpenRouter** | openai/gpt-4o | `OPENROUTER_API_KEY` |
-| **SiliconFlow** | DeepSeek-V3 | `SILICONFLOW_API_KEY` |
-| **Zhipu GLM** | glm-4-flash | `ZHIPU_API_KEY` |
-| **Moonshot** | moonshot-v1-8k | `MOONSHOT_API_KEY` |
-| **Qwen** | qwen-plus | `DASHSCOPE_API_KEY` |
-
-**Recommendation**: We recommend using **DeepSeek** as it was used throughout development and testing. Translating a typical GBA Pokémon ROM costs approximately 2 RMB (~$0.28 USD) with DeepSeek.
-
----
-
-## Usage Guide
-
-### CLI Commands
-
-#### 1. Complete Pipeline (Recommended)
-
-Complete extraction, translation, and building in one command:
+Run the complete local pipeline:
 
 ```bash
 meowth full pokemon.gba \
-  --provider deepseek \
+  --provider local \
   --source en \
-  --target en \
+  --target de \
   --output-dir outputs
 ```
 
-**Options Explanation**:
-- `--provider`: LLM provider to use
-- `--source`: Source language code (default: "en")
-- `--target`: Target language code (default: "en")
-- `--output-dir`: Output folder (default: "outputs")
-- `--work-dir`: Temporary working folder (default: "work")
-- `--batch-size`: Texts per translation batch (default: 30)
-- `--workers`: Parallel translation threads (default: 10)
-- `--api-base`: Custom API address (for OpenAI-compatible APIs)
-- `--api-key-env`: Environment variable name for API key
-- `--model`: Custom model name
-
-#### 2. Step-by-Step Pipeline
-
-For advanced users who need more control:
+Or execute individual stages:
 
 ```bash
-# Step 1: Extract text from ROM
-meowth extract pokemon.gba -o texts.json
-
-# Step 2: Translate text
-export DEEPSEEK_API_KEY="sk-your-key"
-meowth translate texts.json \
-  --provider deepseek \
-  --target en \
-  -o texts_translated.json
-
-# Step 3: Build translated ROM
-meowth build pokemon.gba \
-  --translations texts_translated.json \
-  -o pokemon_en.gba
+meowth extract pokemon.gba -o work/texts.json
+meowth translate work/texts.json --provider local --target de -o work/translated.json
+meowth build pokemon.gba --translations work/translated.json -o outputs/pokemon_de.gba
 ```
 
-#### 3. Using Configuration File (meowth.toml)
-
-Create `meowth.toml` in your working directory:
-
-```toml
-[translation]
-provider = "deepseek"
-model = "deepseek-chat"
-source_language = "en"
-target_language = "en"
-
-[translation.api]
-key_env = "DEEPSEEK_API_KEY"
-base_url = "https://api.deepseek.com/v1"
-```
-
-Then simply run:
-```bash
-export DEEPSEEK_API_KEY="sk-your-key"
-meowth full pokemon.gba
-```
-
-### GUI Features
-
-The GUI provides a user-friendly interface with:
-
-- **ROM Selection**: Browse and select your GBA Pokémon ROM
-- **Provider Configuration**: Easy setup of LLM API keys
-- **Translation Settings**: Configure source/target languages and translation parameters
-- **Progress Tracking**: Real-time progress updates with detailed logging
-- **Error Handling**: Clear error messages and fix suggestions
-- **Output Management**: Organize and manage translated ROMs
-
----
-
-## Supported Languages
-
-Currently supported languages:
-
-- **English** - `en`
-- **Spanish** - `es`
-- **French** - `fr`
-- **German** - `de`
-- **Italian** - `it`
-- **Chinese** - `zh-Hans`
-
-**Important**: Chinese translation only supports binary patched ROMs, not decompilation projects. Other language combinations have no such restriction.
+Run `meowth COMMAND --help` for all options.
 
 ## Configuration
 
-### Environment Variables
-
-Set these in your shell or `.env` file:
-
-```bash
-# API Keys
-export DEEPSEEK_API_KEY="sk-..."
-export OPENAI_API_KEY="sk-..."
-export GOOGLE_API_KEY="..."
-
-# Optional: Custom API address (for OpenAI-compatible services)
-export CUSTOM_API_BASE="https://api.example.com/v1"
-```
-
-### Configuration File (meowth.toml)
+`meowth.toml` provides CLI defaults:
 
 ```toml
 [translation]
-provider = "deepseek"              # LLM provider
-model = "deepseek-chat"            # Model name
-source_language = "en"             # Source language code
-target_language = "en"             # Target language code
-batch_size = 30                    # Texts per batch
-max_workers = 10                   # Parallel workers
+provider = "local"
+model = "argos-opus"
+source_language = "en"
+target_language = "de"
+terminology_file = "~/.meowth/terminology.toml"
+llm_for_tables = true
+
+[output]
+dir = "outputs"
+cache_dir = "work/cache"
+```
+
+Remote providers can define an API endpoint and environment variable:
+
+```toml
+[translation]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
 
 [translation.api]
-key_env = "DEEPSEEK_API_KEY"       # Environment variable for API key
-base_url = "https://api.deepseek.com/v1"  # API endpoint URL
+key_env = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
 ```
 
+Supported providers include local, DeepSeek, OpenAI, Anthropic, Google, Groq,
+Mistral, OpenRouter, SiliconFlow, Zhipu, Moonshot and Qwen.
 
-## Advanced Usage
+## Development
 
-### Using Custom Models
-
-Use a different model with your provider:
+Run the existing validation suite:
 
 ```bash
-# OpenAI with GPT-4 Turbo
-meowth full pokemon.gba \
-  --provider openai \
-  --model gpt-4-turbo \
-  --target en
-
-# DeepSeek specific version
-meowth full pokemon.gba \
-  --provider deepseek \
-  --model deepseek-chat \
-  --target en
+python -m pytest -q tests
+dotnet build src/MeowthBridge/MeowthBridge.csproj -c Debug
 ```
 
-### Using Custom API Endpoints
+### CI and releases
 
-For OpenAI-compatible APIs:
+GitHub Actions runs tests and creates downloadable build artifacts after every
+push to `main`. Standard GitHub-hosted runners are free for public repositories.
+
+A version tag creates one GitHub Release containing all desktop applications
+and standalone MeowthBridge bundles:
 
 ```bash
-meowth full pokemon.gba \
-  --provider openai \
-  --api-base "https://api.yourservice.com/v1" \
-  --api-key-env "YOUR_API_KEY" \
-  --model "your-model" \
-  --target en
+git tag v0.3.6
+git push origin v0.3.6
 ```
 
-### Batch Translation
+The tag should match the version in `pyproject.toml`. Release artifacts are
+unsigned and do not contain ROMs or local model weights.
 
-Translate multiple ROMs:
+## Supported languages
 
-```bash
-for rom in *.gba; do
-  meowth full "$rom" \
-    --provider deepseek \
-    --target en \
-    --output-dir translated/
-done
-```
+- English (`en`)
+- German (`de`)
+- Spanish (`es`)
+- French (`fr`)
+- Italian (`it`)
+- Simplified Chinese (`zh-Hans`)
 
-### Performance Tuning
-
-Adjust batch size and worker count for optimal performance:
-
-```bash
-# Faster (more aggressive, higher cost)
-meowth full pokemon.gba \
-  --provider deepseek \
-  --batch-size 50 \
-  --workers 20 \
-  --target en
-
-# Slower (more conservative, lower cost)
-meowth full pokemon.gba \
-  --provider deepseek \
-  --batch-size 10 \
-  --workers 5 \
-  --target en
-```
-
-
-## Supported Games
-
-This tool has been tested with:
-
-- Pokémon Gaia v3.2
-- Pokémon SeaGlass v3.0
-- Pokémon Rogue Ex v2.0.1a
-
-Other GBA Pokémon games should also work, but may need adjustments.
-
+Support depends on both PokeAPI language data and availability of a direct
+local model or configured cloud provider.
 
 ## Troubleshooting
 
-### "Could not find MeowthBridge"
-- **Cause**: Application files are corrupted or incompletely installed
-- **Solution**: Reinstall the application or rebuild from source
+### Local model download fails
 
-### "API Key not found"
-- **Cause**: API key environment variable is not set
-- **Solution**:
-  ```bash
-  export DEEPSEEK_API_KEY="sk-your-actual-key"
-  ```
+The first local translation needs internet access. Check the connection and
+retry. Models already installed under `~/.meowth/models/argos` are reused.
 
-### GUI won't launch (macOS)
-- **Cause**: macOS security restrictions on first run
-- **Solution**:
-  1. Go to System Settings → Privacy & Security
-  2. Find the message about "Meowth Translator" being blocked
-  3. Click "Open Anyway"
+### MeowthBridge cannot be found
 
-### "ROM extraction failed"
-- **Cause**: ROM might be corrupted or unsupported format
-- **Solution**:
-  1. Verify the ROM is a valid GBA file
-  2. For Chinese translations, ensure the ROM is not from a decompilation project
-  3. Try a known working ROM first
+Reinstall the packaged application, build the bridge with .NET 8, or set
+`MEOWTH_BRIDGE_PATH` to a matching executable directory.
 
-For more help, check [GitHub Issues](https://github.com/Olcmyk/Meowth-GBA-Translator/issues)
+### macOS blocks the application
 
----
+Open **System Settings → Privacy & Security** and choose **Open Anyway**, or
+right-click the application and choose **Open**. Published builds are not yet
+code-signed or notarized.
 
-## Translation Process Explained
+### Translation terminology is wrong
 
-### Phase 1: Extraction (meowth extract)
-- Scans the ROM for translatable text
-- Extracts strings, dialogue, item names, etc.
-- Output: `texts.json`
-- Time: ~30 seconds
-
-### Phase 2: Translation (meowth translate)
-- Sends text batches to the LLM
-- Preserves special codes and formatting
-- Applies language-specific optimizations
-- Output: `texts_translated.json`
-- Time: 5-30 minutes (depends on ROM size and LLM speed)
-
-### Phase 3: Building (meowth build)
-- Injects translated text back into ROM
-- For Chinese: Applies font patches (required)
-- Creates the final translated ROM
-- Output: `pokemon_en.gba`
-- Time: ~1 minute
-
----
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
-
----
+Add the source and desired target phrase to
+`~/.meowth/terminology.toml`, restart Meowth and retry the affected rows.
 
 ## Credits
 
-Built with:
+- [HexManiacAdvance](https://github.com/entropyus/HexManiacAdvance)
+- [PokéAPI](https://pokeapi.co/)
+- [Argos Translate](https://www.argosopentech.com/)
+- [CTranslate2](https://github.com/OpenNMT/CTranslate2)
+- [Pokemon GBA Font Patch](https://github.com/Wokann/Pokemon_GBA_Font_Patch)
+- [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)
 
-- [HexManiacAdvance](https://github.com/entropyus/HexManiacAdvance) - ROM extraction and injection
-- [Pokemon_GBA_Font_Patch](https://github.com/Wokann/Pokemon_GBA_Font_Patch) - Chinese font patching
-- [customtkinter](https://github.com/TomSchimansky/CustomTkinter) - Modern GUI framework
-- [click](https://click.palletsprojects.com/) - CLI framework
-- [LLM Providers](https://openai.com/) - AI-powered translation
+## License
 
----
-
-## Support
-
-- Found a bug? [Submit an Issue](https://github.com/Olcmyk/Meowth-GBA-Translator/issues)
-- Have a question? [Start a Discussion](https://github.com/Olcmyk/Meowth-GBA-Translator/discussions)
-- Like the project? [Star us on GitHub](https://github.com/Olcmyk/Meowth-GBA-Translator)
-
----
-
-## Contributing
-
-Contributions are welcome! Areas you can help:
-
-- Add support for more languages
-- Add support for translating decompilation-based ROMs to Chinese
-- Improve GUI/UX
-- Write documentation
-
----
-
-**Made with ❤️ for the Pokémon fan translation community**
+[MIT](LICENSE)

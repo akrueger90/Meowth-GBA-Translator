@@ -1,274 +1,210 @@
-# DISABLED: Using local build and manual upload instead
-# To re-enable, remove the "on: []" line below and restore the original triggers
-name: Build GUI App
+name: Build Desktop Apps
 
-on: []
-# Original triggers (disabled):
-#  release:
-#    types: [published]
-#  workflow_dispatch:
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
+  quality:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[gui,dev,local]"
+
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
+
+      - name: Run tests
+        run: python -m pytest -q tests
+
   build-binaries:
-    name: Build C# binaries
+    name: Build native bridges
+    needs: quality
     uses: ./.github/workflows/build-csharp.yml
-    permissions:
-      contents: write  # Required for upload-to-release job
 
-  build-macos:
-    name: Build macOS App
-    runs-on: macos-latest
+  build-app:
+    name: ${{ matrix.label }}
     needs: build-binaries
-    permissions:
-      contents: write
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            platform: windows-x64
+            bridge: meowth-bridge-windows-x64
+            package: dist/Meowth-Translator-Windows-x64.zip
+          - label: Linux x64
+            os: ubuntu-latest
+            platform: linux-x64
+            bridge: meowth-bridge-linux-x64
+            package: dist/Meowth-Translator-Linux-x64.tar.gz
+          - label: macOS Intel
+            os: macos-15-intel
+            platform: macos-x64
+            bridge: meowth-bridge-macos-x64
+            package: dist/Meowth-Translator-macOS-x64.dmg
+          - label: macOS Apple Silicon
+            os: macos-15
+            platform: macos-arm64
+            bridge: meowth-bridge-macos-arm64
+            package: dist/Meowth-Translator-macOS-arm64.dmg
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
+          cache: pip
 
-      - name: Install dependencies
-        run: |
-          pip install pyinstaller customtkinter Pillow click httpx
+      - name: Install build dependencies
+        run: python -m pip install pyinstaller -e ".[gui,local]"
 
-      - name: Download MeowthBridge binary
+      - name: Download native bridge
         uses: actions/download-artifact@v4
         with:
-          name: meowth-bridge-macos
-          path: src/meowth/binaries/macos/
-
-      - name: Verify downloaded MeowthBridge structure
-        run: |
-          echo "=== MeowthBridge binary structure ==="
-          ls -la src/meowth/binaries/macos/
-          echo ""
-          echo "=== Resources directory ==="
-          ls -la src/meowth/binaries/macos/resources/ || echo "ERROR: resources directory not found!"
-          echo ""
-          echo "=== Check critical files ==="
-          test -f src/meowth/binaries/macos/resources/hma.py && echo "✓ hma.py found" || echo "✗ hma.py MISSING!"
-          test -f src/meowth/binaries/macos/resources/default.toml && echo "✓ default.toml found" || echo "✗ default.toml MISSING!"
-
-      - name: Make MeowthBridge executable
-        run: chmod +x src/meowth/binaries/macos/MeowthBridge
-
-      - name: Build armips
-        run: |
-          cd armips
-          mkdir -p build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release
-          cmake --build . --config Release
-          mkdir -p ../../tools
-          cp armips ../../tools/armips
-          chmod +x ../../tools/armips
-
-      - name: Remove Windows armips to avoid conflicts
-        run: |
-          rm -f tools/armips.exe
-          echo "Removed Windows armips binary to ensure only macOS version is packaged"
-          ls -la tools/
-
-      - name: Prepare glossary directory
-        run: mkdir -p resources
-
-      - name: Pre-build glossary JSON files
-        run: |
-          PYTHONPATH=src python -c "
-          from meowth.glossary import Glossary
-          from meowth.languages import SUPPORTED_LANGUAGES
-          import json
-          from pathlib import Path
-
-          for target in SUPPORTED_LANGUAGES:
-              if target == 'en':
-                  continue
-              g = Glossary(source_lang='en', target_lang=target)
-              data = {'source_to_target': g.source_to_target}
-              out = Path('resources') / f'glossary_en_{target}.json'
-              out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-              print(f'Generated {out} ({len(g.source_to_target)} terms)')
-          "
-          ls -la resources/glossary_*.json
-
-      - name: Get customtkinter path
-        id: ctk
-        run: |
-          CTK_PATH=$(python -c "import customtkinter; import os; print(os.path.dirname(customtkinter.__file__))")
-          echo "path=$CTK_PATH" >> $GITHUB_OUTPUT
-
-      - name: Build with PyInstaller
-        run: |
-          pyinstaller \
-            --name "Meowth Translator" \
-            --windowed \
-            --onedir \
-            --add-data "src/meowth:meowth" \
-            --add-data "resources:resources" \
-            --add-data "pokeapi/data/v2/csv:pokeapi/data/v2/csv" \
-            --add-data "Pokemon_GBA_Font_Patch:Pokemon_GBA_Font_Patch" \
-            --add-data "tools:tools" \
-            --hidden-import customtkinter \
-            --hidden-import PIL \
-            --hidden-import click \
-            --hidden-import httpx \
-            --collect-all customtkinter \
-            launcher.py
-
-      - name: Create DMG
-        run: |
-          # Clean up any existing files from previous runs
-          rm -rf dmg_content
-          rm -f "dist/Meowth-Translator-macOS.dmg"
-
-          # Create DMG
-          mkdir -p dmg_content
-          cp -r "dist/Meowth Translator.app" dmg_content/
-          ln -s /Applications dmg_content/Applications
-          hdiutil create -volname "Meowth Translator" \
-            -srcfolder dmg_content \
-            -ov -format UDZO \
-            "dist/Meowth-Translator-macOS.dmg"
-
-      - name: Upload macOS App
-        uses: actions/upload-artifact@v4
-        with:
-          name: meowth-translator-macos
-          path: dist/Meowth-Translator-macOS.dmg
-          retention-days: 30
-
-      - name: Upload to Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/Meowth-Translator-macOS.dmg
-
-  build-windows:
-    name: Build Windows App
-    runs-on: windows-latest
-    needs: build-binaries
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: |
-          pip install pyinstaller customtkinter Pillow click httpx
-
-      - name: Download MeowthBridge binary
-        uses: actions/download-artifact@v4
-        with:
-          name: meowth-bridge-windows
-          path: src/meowth/binaries/windows/
-
-      - name: Verify downloaded MeowthBridge structure
-        shell: bash
-        run: |
-          echo "=== MeowthBridge binary structure ==="
-          ls -la src/meowth/binaries/windows/
-          echo ""
-          echo "=== Resources directory ==="
-          ls -la src/meowth/binaries/windows/resources/ || echo "ERROR: resources directory not found!"
-          echo ""
-          echo "=== Check critical files ==="
-          test -f src/meowth/binaries/windows/resources/hma.py && echo "✓ hma.py found" || echo "✗ hma.py MISSING!"
-          test -f src/meowth/binaries/windows/resources/default.toml && echo "✓ default.toml found" || echo "✗ default.toml MISSING!"
-
-      - name: Setup MSVC for armips
-        uses: ilammy/msvc-dev-cmd@v1
+          name: ${{ matrix.bridge }}
+          path: src/meowth/binaries/${{ matrix.platform }}/
 
       - name: Build armips
         shell: bash
         run: |
-          cd armips
-          mkdir -p build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release
-          cmake --build . --config Release
-          mkdir -p ../../tools
-          cp Release/armips.exe ../../tools/armips.exe
+          cmake -S armips -B armips/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build armips/build --config Release
+          mkdir -p tools
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp armips/build/Release/armips.exe tools/armips.exe
+            rm -f tools/armips
+          else
+            cp armips/build/armips tools/armips
+            chmod +x tools/armips
+            rm -f tools/armips.exe
+            chmod +x "src/meowth/binaries/${{ matrix.platform }}/MeowthBridge"
+          fi
 
-      - name: Remove macOS armips to avoid conflicts
+      - name: Build desktop application
         shell: bash
         run: |
-          rm -f tools/armips
-          echo "Removed macOS armips binary to ensure only Windows version is packaged"
-          ls -la tools/
-
-      - name: Prepare glossary directory
-        shell: bash
-        run: mkdir -p resources
-
-      - name: Pre-build glossary JSON files
-        shell: bash
-        run: |
-          PYTHONPATH=src python -c "
-          from meowth.glossary import Glossary
-          from meowth.languages import SUPPORTED_LANGUAGES
-          import json
-          from pathlib import Path
-
-          for target in SUPPORTED_LANGUAGES:
-              if target == 'en':
-                  continue
-              g = Glossary(source_lang='en', target_lang=target)
-              data = {'source_to_target': g.source_to_target}
-              out = Path('resources') / f'glossary_en_{target}.json'
-              out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-              print(f'Generated {out} ({len(g.source_to_target)} terms)')
-          "
-          ls -la resources/glossary_*.json
-
-      - name: Get customtkinter path
-        id: ctk
-        shell: bash
-        run: |
-          CTK_PATH=$(python -c "import customtkinter; import os; print(os.path.dirname(customtkinter.__file__))")
-          echo "path=$CTK_PATH" >> $GITHUB_OUTPUT
-
-      - name: Build with PyInstaller
-        shell: bash
-        run: |
+          separator=":"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            separator=";"
+          fi
           pyinstaller \
             --name "Meowth Translator" \
             --windowed \
             --onedir \
-            --add-data "src/meowth;meowth" \
-            --add-data "resources;resources" \
-            --add-data "pokeapi/data/v2/csv;pokeapi/data/v2/csv" \
-            --add-data "Pokemon_GBA_Font_Patch;Pokemon_GBA_Font_Patch" \
-            --add-data "tools;tools" \
+            --add-data "src/meowth${separator}meowth" \
+            --add-data "pokeapi/data/v2/csv${separator}pokeapi/data/v2/csv" \
+            --add-data "Pokemon_GBA_Font_Patch${separator}Pokemon_GBA_Font_Patch" \
+            --add-data "tools${separator}tools" \
             --hidden-import customtkinter \
             --hidden-import PIL \
             --hidden-import click \
             --hidden-import httpx \
+            --hidden-import ctranslate2 \
+            --hidden-import sentencepiece \
             --collect-all customtkinter \
+            --collect-all ctranslate2 \
+            --collect-all sentencepiece \
             launcher.py
 
-      - name: Create ZIP
+      - name: Package Windows
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist\Meowth Translator" -DestinationPath "dist\Meowth-Translator-Windows.zip"
+          Compress-Archive `
+            -Path "dist\Meowth Translator" `
+            -DestinationPath "dist\Meowth-Translator-Windows-x64.zip"
 
-      - name: Upload Windows App
-        uses: actions/upload-artifact@v4
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        run: |
+          tar -czf dist/Meowth-Translator-Linux-x64.tar.gz -C dist "Meowth Translator"
+
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dmg-content
+          cp -R "dist/Meowth Translator.app" dmg-content/
+          ln -s /Applications dmg-content/Applications
+          hdiutil create \
+            -volname "Meowth Translator" \
+            -srcfolder dmg-content \
+            -ov \
+            -format UDZO \
+            "${{ matrix.package }}"
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: meowth-translator-windows
-          path: dist/Meowth-Translator-Windows.zip
+          name: meowth-translator-${{ matrix.platform }}
+          path: ${{ matrix.package }}
+          if-no-files-found: error
           retention-days: 30
 
-      - name: Upload to Release
-        if: github.event_name == 'release'
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download desktop packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: meowth-translator-*
+          path: release/gui
+          merge-multiple: true
+
+      - name: Download bridge packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: meowth-bridge-*
+          path: release/bridge
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release/assets
+          find release/gui -maxdepth 1 -type f -exec cp {} release/assets/ \;
+          for platform in windows-x64 linux-x64 macos-x64 macos-arm64; do
+            artifact="release/bridge/meowth-bridge-${platform}"
+            test -d "$artifact"
+            (
+              cd "$artifact"
+              zip -r "../../assets/MeowthBridge-${platform}.zip" .
+            )
+          done
+          ls -lh release/assets
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Meowth-Translator-Windows.zip
+          generate_release_notes: true
+          files: release/assets/*

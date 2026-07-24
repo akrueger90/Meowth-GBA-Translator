@@ -237,7 +237,10 @@ def _download_meowth_bridge() -> Path:
     version = get_meowth_version()
 
     asset_name = f"MeowthBridge-{platform_arch}.zip"
-    download_url = f"https://github.com/Olcmyk/Meowth-GBA-Translator/releases/download/v{version}/{asset_name}"
+    download_url = (
+        "https://github.com/akrueger90/Meowth-GBA-Translator/"
+        f"releases/download/v{version}/{asset_name}"
+    )
 
     # Versioned, architecture-specific caches prevent stale native libraries
     # from being mixed with a newly downloaded apphost.

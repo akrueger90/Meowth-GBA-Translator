@@ -114,7 +114,6 @@ class ReviewPanel(ctk.CTkFrame):
         ctk.CTkButton(controls, text="Select Suspects", width=120, command=self._select_suspects).pack(side="left", padx=(6, 0))
         ctk.CTkButton(controls, text="Next Untranslated", width=140, command=self._select_next_untranslated).pack(side="left", padx=(6, 0))
         ctk.CTkButton(controls, text="Clear", width=90, command=self._clear_selection).pack(side="left", padx=(6, 0))
-        ctk.CTkButton(controls, text="Category Settings", width=140, command=self._show_category_settings, fg_color="#8b5cf6", hover_color="#7c3aed").pack(side="left", padx=(6, 0))
 
         self.start_button = ctk.CTkButton(
             controls,
@@ -516,10 +515,6 @@ class ReviewPanel(ctk.CTkFrame):
             messagebox.showwarning("No Selection", "Select at least one row.")
             return
         self.on_action("llm_selected", {"selected_keys": selected_keys})
-
-    def _show_category_settings(self):
-        """Open category settings dialog."""
-        self.on_action("category_settings", {})
 
     def _save_manual(self):
         key = self._selected_key()

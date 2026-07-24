@@ -45,7 +45,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[gui,dev]"
 
       - name: Check imports
         run: |
@@ -65,12 +65,5 @@ jobs:
           python -m meowth build --help
           python -m meowth full --help
 
-      - name: Run pytest (if tests exist)
-        run: |
-          if [ -d "tests" ]; then
-            pytest -v
-          else
-            echo "No tests directory found, skipping pytest"
-          fi
-        shell: bash
-        continue-on-error: true
+      - name: Run pytest
+        run: python -m pytest -q tests
